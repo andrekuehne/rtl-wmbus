@@ -138,6 +138,31 @@ A new options "-o", which means "remove dc offset", was introduced. The overall 
  * cat samples/rtlsdr_868.950M_1M6_issue49.cu8 | build/rtl_wmbus -o
  * cat samples/rtlsdr_868.625M_2M4_issue48.cu8 | build/rtl_wmbus -d 3 -s -o
 
+C1 fast path (option "-c R")
+----------------------------
+
+For C1-only (and T1) reception "-c R" runs the T1/C1 chain at 400 kS/s instead
+of 800 kS/s, which roughly halves the per-sample work. R is the input rate divided
+by 400 kHz, between 3 and 8: use 3 for 1.2 MS/s, 4 for 1.6 MS/s, 6 for 2.4 MS/s.
+The input is centered in integer arithmetic and decimated by R with a three-stage
+CIC filter, followed by a 6-tap low pass and a resonator at a quarter of the
+sample rate for time2 clock recovery.
+ * rtl_sdr -f 868.95M -s 1600000 - 2>/dev/null | build/rtl_wmbus -c 4 -o
+ * rtl_sdr -f 868.95M -s 1200000 - 2>/dev/null | build/rtl_wmbus -c 3 -o
+ * rtl_sdr -f 868.625M -s 1600000 - 2>/dev/null | build/rtl_wmbus -c 4 -s
+
+The fast path has no S1 chain: "-p T" is rejected and "-p S" changes nothing.
+"-s" shifts the input by +325 kHz (T1/C1 only) before decimation, so
+recordings made at 868.625 MHz remain usable. "-d" is rejected because R sets the
+decimation. "-o", "-a", "-r 0", "-t 0", "-v" and "-f" keep their meaning. T1
+frames still decode (same physical layer), but the path is tuned and validated
+for C1. RSSI values differ slightly from the default path because of the different
+decimation filter and RSSI smoothing. Without "-c" nothing changes.
+
+`filter/c1_fast_path_constants.py` derives the decimator figures, filter taps and
+other constants; `tests/c1_synth.py` generates synthetic C1 mode A/B frames and
+compares the sensitivity of both paths.
+
   Testing
   -------
 
@@ -155,6 +180,15 @@ comes from the frozen `7f34d82` baseline. Only valid wall-clock timestamps are
 normalized; payloads, RSSI, CRC status, order, duplicates, stderr, and exit status
 must match. Existing CRC-invalid rows are retained. Do not regenerate expected
 output automatically from a candidate change.
+
+Four more cases replay the T1/C1 captures through the C1 fast path ("-c 4") with
+the same other options. Their reviewed expected output was added with the fast
+path; `tests/test_c1_fast.py` also checks that they contain every CRC-valid
+row of the corresponding default case, decodes synthetic frames at 1.2 and
+1.6 MS/s, and covers fragmented input, flow monitoring and rejected options.
+`python3 tests/c1_synth.py sweep --binary build/rtl_wmbus --output sweep.json`
+compares both paths over carrier offset, chip rate, SNR and amplitude; it takes
+several minutes and is not part of `make check`.
 
 Results are written to `build/test-results/`. Run a selected case with
 `python3 tests/replay_captures.py --binary build/rtl_wmbus --case c1-short`.

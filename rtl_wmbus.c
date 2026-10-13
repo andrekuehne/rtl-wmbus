@@ -1014,6 +1014,7 @@ static void print_usage(const char *program_name)
     fprintf(stdout, "\t-s receive S1 and T1/C1 datagrams simultaneously. rtl_sdr _MUST_ be set to 868.625MHz (-f 868.625M)\n");
     fprintf(stdout, "\t-p [T,S] to disable processing T1/C1 or S1 mode\n");
     fprintf(stdout, "\t-f exit if incoming data stalled for 5 seconds\n");
+    fprintf(stdout, "\t-c R C1 fast path: input rate is R x 400kHz (R = 3..8, e.g. 4 for 1.6Ms/s); receives T1/C1 at 400kHz, no S1; not with -d or -p T\n");
     fprintf(stdout, "\t-h print this help\n");
 }
 

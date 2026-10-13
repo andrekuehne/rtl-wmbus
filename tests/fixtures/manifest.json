@@ -80,6 +80,69 @@
       ],
       "expected": "tests/expected/tracked-issue48.txt",
       "expected_sha256": "3f2d315a4bf0479a38158278cf5f0f26c572adc9f514df209f38a8c243167d54"
+    },
+    {
+      "name": "fast-tracked-issue47",
+      "input": "samples/rtlsdr_868.950M_1M6_issue47.cu8",
+      "gzip": false,
+      "sha256": "f1057d3c409f8d1f90a66ad118f4c0354f5f0b8707e40a4be10b64ea44ff4457",
+      "sample_rate_hz": 1600000,
+      "center_frequency_hz": 868950000,
+      "options": [
+        "-o",
+        "-c",
+        "4"
+      ],
+      "expected": "tests/expected/fast-tracked-issue47.txt",
+      "expected_sha256": "75e3596d2360935d3be93a46b89a567419e6611e6c09d62933faa12af558861f",
+      "fast_path_of": "tracked-issue47"
+    },
+    {
+      "name": "fast-tracked-issue49",
+      "input": "samples/rtlsdr_868.950M_1M6_issue49.cu8",
+      "gzip": false,
+      "sha256": "9e903add270ac3df3a25439870b7a2e3886f204f2c18bb113ffe783425acff6b",
+      "sample_rate_hz": 1600000,
+      "center_frequency_hz": 868950000,
+      "options": [
+        "-o",
+        "-c",
+        "4"
+      ],
+      "expected": "tests/expected/fast-tracked-issue49.txt",
+      "expected_sha256": "c5af03148d7cf00f7438b8e5284a8a07fefaeb7d13caa90c8fc7b609229015a9",
+      "fast_path_of": "tracked-issue49"
+    },
+    {
+      "name": "fast-tracked-samples2",
+      "input": "samples/rtlsdr_868.950M_1M6_samples2.cu8",
+      "gzip": false,
+      "sha256": "012e3369149fca9837d083130e07a179a6a77117c29cb24f586b2287bd9783d2",
+      "sample_rate_hz": 1600000,
+      "center_frequency_hz": 868950000,
+      "options": [
+        "-c",
+        "4"
+      ],
+      "expected": "tests/expected/fast-tracked-samples2.txt",
+      "expected_sha256": "704d705375b82ebd023682def27fdda72267d1a1e38cc7a4615efd7b9ee0305b",
+      "fast_path_of": "tracked-samples2"
+    },
+    {
+      "name": "fast-c1-short",
+      "input": "tests/fixtures/c1-short.cu8.gz",
+      "gzip": true,
+      "sha256": "5b4ccbb366919bc27781a3e8e1ce25f37865a263cd32e5101b75189d11b0a9a7",
+      "sample_rate_hz": 1600000,
+      "center_frequency_hz": 868625000,
+      "options": [
+        "-s",
+        "-c",
+        "4"
+      ],
+      "expected": "tests/expected/fast-c1-short.txt",
+      "expected_sha256": "5046ba3e0a2a25a16ced152f1881f80449656bb06c60447042708d25d349ca3a",
+      "fast_path_of": "c1-short"
     }
   ],
   "derived_fixture_provenance": {
@@ -119,5 +182,6 @@
       },
       "note": "Unmodified byte slice of the recentered recording, with up to 0.5 s warm-up and 0.1 s trailing data around a CRC-valid packet. Mode-only refers to decoded traffic, not proof of an RF-silent other channel."
     }
-  }
+  },
+  "fast_path_expected": "Cases with fast_path_of hold reviewed -c output from andrekuehne/rtl-wmbus#27, not the frozen baseline. Their CRC-OK rows must include every CRC-OK row of the named default case."
 }
