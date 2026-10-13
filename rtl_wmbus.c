@@ -1242,8 +1242,12 @@ int main(int argc, char *argv[])
 
     __attribute__((__aligned__(16))) uint8_t samples[4096];
     const int fs_kHz = opts_decimation_rate*800; // Sample rate [kHz] as a multiple of 800 kHz.
-    float i_t1_c1, q_t1_c1;
-    float i_s1, q_s1;
+    float i_t1_c1 = 0.f, q_t1_c1 = 0.f;
+    float i_s1 = 0.f, q_s1 = 0.f;
+    enum { PROCESS_T1_C1 = 1, PROCESS_S1 = 2 };
+    const unsigned enabled_modes = (opts_t1_c1_processing_enabled ? PROCESS_T1_C1 : 0)
+                                 | (opts_s1_processing_enabled ? PROCESS_S1 : 0);
+    const int both_modes_enabled = enabled_modes == (PROCESS_T1_C1 | PROCESS_S1);
 
 
     unsigned decimation_rate_index = 0;
@@ -1324,18 +1328,31 @@ int main(int argc, char *argv[])
             // Low-Pass-Filtering before decimation is necessary, to ensure
             // that i and q signals don't contain frequencies above new sample
             // rate. Moving average can be viewed as a low pass filter.
-            i_t1_c1 = moving_average_t1_c1(i_t1_c1_unfilt, 0);
-            q_t1_c1 = moving_average_t1_c1(q_t1_c1_unfilt, 1);
+            if (both_modes_enabled)
+            {
+                i_t1_c1 = moving_average_t1_c1(i_t1_c1_unfilt, 0);
+                q_t1_c1 = moving_average_t1_c1(q_t1_c1_unfilt, 1);
+                i_s1 = moving_average_s1(i_s1_unfilt, 0);
+                q_s1 = moving_average_s1(q_s1_unfilt, 1);
+            }
+            else
+            {
+                // Options are fixed at startup; disabled histories are never used.
+                if (enabled_modes & PROCESS_T1_C1)
+                {
+                    i_t1_c1 = moving_average_t1_c1(i_t1_c1_unfilt, 0);
+                    q_t1_c1 = moving_average_t1_c1(q_t1_c1_unfilt, 1);
+                }
+                if (enabled_modes & PROCESS_S1)
+                {
+                    i_s1 = moving_average_s1(i_s1_unfilt, 0);
+                    q_s1 = moving_average_s1(q_s1_unfilt, 1);
+                }
+            }
 
             #if 0
             equalizer_complex_t1_c1(&i_t1_c1, &q_t1_c1);
             #endif
-
-            // Low-Pass-Filtering before decimation is necessary, to ensure
-            // that i and q signals don't contain frequencies above new sample
-            // rate. Moving average can be viewed as a low pass filter.
-            i_s1 = moving_average_s1(i_s1_unfilt, 0);
-            q_s1 = moving_average_s1(q_s1_unfilt, 1);
 
             #if 0
             equalizer_complex_s1(&i_s1, &q_s1); // FIXME: Function does not exist.
@@ -1345,8 +1362,10 @@ int main(int argc, char *argv[])
             if (decimation_rate_index < opts_decimation_rate) continue;
             decimation_rate_index = 0;
 
-            process_t1_c1_chain(i_t1_c1, q_t1_c1, &t2_algo_t1_c1, &rl_algo_t1_c1, polar_discriminator_t1_c1_function);
-            process_s1_chain(i_s1, q_s1, &t2_algo_s1, &rl_algo_s1, polar_discriminator_s1_function);
+            if (enabled_modes & PROCESS_T1_C1)
+                process_t1_c1_chain(i_t1_c1, q_t1_c1, &t2_algo_t1_c1, &rl_algo_t1_c1, polar_discriminator_t1_c1_function);
+            if (enabled_modes & PROCESS_S1)
+                process_s1_chain(i_s1, q_s1, &t2_algo_s1, &rl_algo_s1, polar_discriminator_s1_function);
         }
     }
 

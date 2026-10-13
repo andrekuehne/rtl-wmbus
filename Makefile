@@ -74,7 +74,7 @@ test-captures:
 	$(PYTHON) tests/replay_captures.py --binary $(OUTFILE)
 
 test-runner:
-	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
+	RTL_WMBUS_TEST_BINARY=$(OUTFILE) $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
 lint: check-warnings check-static
 
