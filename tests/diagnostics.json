@@ -1,0 +1,103 @@
+{
+  "reviewed_at_commit": "65b0190f6abbe0545874dc5d0b54e041058a4c58",
+  "tool_versions": {
+    "clang": "21.1.8",
+    "cppcheck": "2.19.0"
+  },
+  "policy": "Exact existing diagnostics only. Match file, source statement, diagnostic ID and message; reject additional occurrences. Line-number shifts do not change identity. Review baseline edits; no warning categories are suppressed.",
+  "gcc": [],
+  "clang": [
+    {
+      "file": "t1_c1_packet_decoder.h",
+      "source": "__attribute__((__packed__))",
+      "id": "-Wignored-attributes",
+      "message": "attribute '__packed__' is ignored, place it after \"struct\" to apply attribute to type declaration"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "static void sig_alarm_handler(int signo)",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 'signo'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "{",
+      "id": "-Wmissing-noreturn",
+      "message": "function 'sig_alarm_handler' could be declared with attribute 'noreturn'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "void t1_c1_signal_chain_empty(float i_t1_c1, float q_t1_c1,",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 'i_t1_c1'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "void t1_c1_signal_chain_empty(float i_t1_c1, float q_t1_c1,",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 'q_t1_c1'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "struct time2_algorithm_t1_c1 *t2_algo_t1_c1,",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 't2_algo_t1_c1'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "struct runlength_algorithm_t1_c1 *rl_algo_t1_c1,",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 'rl_algo_t1_c1'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "float (*polar_discriminator_t1_c1_function)(float i, float q))",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 'polar_discriminator_t1_c1_function'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "void s1_signal_chain_empty(float i_s1, float q_s1,",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 'i_s1'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "void s1_signal_chain_empty(float i_s1, float q_s1,",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 'q_s1'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "struct time2_algorithm_s1 *t2_algo_s1,",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 't2_algo_s1'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "struct runlength_algorithm_s1 *rl_algo_s1,",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 'rl_algo_s1'"
+    },
+    {
+      "file": "rtl_wmbus.c",
+      "source": "float (*polar_discriminator_s1_function)(float i, float q))",
+      "id": "-Wunused-parameter",
+      "message": "unused parameter 'polar_discriminator_s1_function'"
+    }
+  ],
+  "cppcheck": [
+    {
+      "file": "s1_packet_decoder.h",
+      "source": "fprintf(stdout, \"%s%s;%u;%u;%s;%u;%u;%08X;\", algorithm, \"S1\",",
+      "id": "invalidPrintfArgType_uint",
+      "message": "%u in format string (no. 4) requires 'unsigned int' but the argument type is 'signed int'."
+    },
+    {
+      "file": "rtl_wmbus_util.h",
+      "source": "struct tm* timeinfo = gmtime(&now);",
+      "id": "gmtimeCalled",
+      "message": "Non reentrant function 'gmtime' called. For threadsafe applications it is recommended to use the reentrant replacement function 'gmtime_r'."
+    }
+  ]
+}

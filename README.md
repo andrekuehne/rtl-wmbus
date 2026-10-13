@@ -164,6 +164,18 @@ Replay coverage does not establish unchanged reception sensitivity, and the C1
 slice contains only one unique telegram. CRC unit checks use the published
 [CRC-16/EN-13757 check vector](https://reveng.sourceforge.io/crc-catalogue/all.htm#crc.cat.crc-16-en-13757).
 
+Run `make lint` with Cppcheck installed to check release/debug/helper compiler
+warnings, static analysis, and patch whitespace. Use `make lint CC=clang` for
+Clang. `DIFF_BASE=<commit>` checks the whole change against that base, which CI
+should set to the PR base or preceding integration commit.
+
+`tests/diagnostics.json` records the exact legacy diagnostics reviewed at
+`65b0190`: 13 Clang warnings and two Cppcheck findings. The latter concern an
+S1 printf argument type and Windows-only use of non-reentrant `gmtime`.
+Matching includes the source statement and occurrence count, so shifting line
+numbers does not mask new findings. No warning categories are suppressed;
+review any baseline edits explicitly. Raw logs are kept in `build/quality/`.
+
   License
   -------
 

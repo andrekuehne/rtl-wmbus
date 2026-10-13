@@ -10,8 +10,10 @@ CFLAGS_WARNINGS?=-Wall -W -Waggregate-return -Wbad-function-cast -Wcast-align -W
 LIB?=-lm
 SRC=rtl_wmbus.c
 PYTHON?=python3
+CPPCHECK?=cppcheck
+DIFF_BASE?=HEAD
 
-.PHONY: all release debug pi1 rebuild install clean test check test-unit test-captures test-runner
+.PHONY: all release debug pi1 rebuild install clean test check test-unit test-captures test-runner lint check-warnings check-static
 
 $(shell $(MKDIR) -p $(OUTDIR))
 
@@ -56,7 +58,7 @@ release:
 	$(CC) -DNDEBUG -O3                  $(CFLAGS) $(CFLAGS_WARNINGS) -o $(OUTFILE) $(SRC) $(LIB)
 
 debug:
-	$(CC) -DDEBUG  -O0 -g3 -ggdb -p -pg $(CFLAGS) $(CFLAGS_WARNINGS) -o $(OUTFILE) $(SRC) $(LIB)
+	$(CC) -DDEBUG  -O0 -g3 -ggdb -pg $(CFLAGS) $(CFLAGS_WARNINGS) -o $(OUTFILE) $(SRC) $(LIB)
 
 test: release
 	$(MAKE) check
@@ -73,6 +75,14 @@ test-captures:
 
 test-runner:
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
+
+lint: check-warnings check-static
+
+check-warnings:
+	$(PYTHON) tests/check_quality.py warnings --compiler "$(CC)" --base "$(DIFF_BASE)"
+
+check-static:
+	$(PYTHON) tests/check_quality.py static --cppcheck "$(CPPCHECK)" --base "$(DIFF_BASE)"
 
 # Will build on Raspberry Pi 1 only
 pi1:
