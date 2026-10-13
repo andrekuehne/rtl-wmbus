@@ -100,6 +100,25 @@ static void sig_alarm_handler(int signo)
 #define C1_FAST_MIN_DECIMATION_RATE 3u // 1.2 MS/s, lowest RTL-SDR rate above 900 kS/s
 #define C1_FAST_MAX_DECIMATION_RATE 8u // 3.2 MS/s, highest RTL-SDR rate
 
+/* DC blocker: same time constant in seconds as the 800 kS/s chain at half
+   the rate, i.e. the squared pole. */
+#ifndef C1_FAST_DC_OFFSET_ALPHA
+#define C1_FAST_DC_OFFSET_ALPHA 0.998001f // T1_C1_DC_OFFSET_ALPHA^2
+#endif
+
+/* RSSI smoother pole 0.5 (3.6 us). The same time constant as at 800 kS/s,
+   1 - (1 - 0.6789)^2, lets brief dips below PACKET_CAPTURE_THRESHOLD abort
+   more weak frames than the 800 kS/s chain; this keeps them. */
+#ifndef C1_FAST_RSSI_ALPHA
+#define C1_FAST_RSSI_ALPHA 0.5f
+#endif
+
+/* Clock resonator pole radius r at fs/4, stored as r^2: 1.28 kHz 3 dB
+   bandwidth, 100-sample (25-bit) time constant. */
+#ifndef C1_FAST_CLOCK_POLE_RADIUS_SQUARED
+#define C1_FAST_CLOCK_POLE_RADIUS_SQUARED 0.9801f // r = 0.99
+#endif
+
 static const uint32_t ACCESS_CODE_T1_C1 = 0x543d;
 static const uint32_t ACCESS_CODE_T1_C1_BITMASK = 0xFFFFu;
 static const unsigned ACCESS_CODE_T1_C1_ERRORS = 0u; // 0 if no errors allowed
@@ -157,6 +176,12 @@ static const uint8_t deglitch_filter_s1[16] = {
          0,   1,   0,   1,   0,   1,   1,   1,
     // 1000 1001 1010 1011 1100 1101 1110 1111
          0,   1,   1,   1,   1,   1,   1,   1
+};
+
+/* C1 fast path, 4 samples per bit: majority of the last 3 raw bits. */
+static const uint8_t deglitch_filter_c1_fast[8] = {
+   // 000 001 010 011 100 101 110 111
+        0,  0,  0,  1,  0,  1,  1,  1
 };
 
 
@@ -776,10 +801,43 @@ struct runlength_algorithm_t1_c1
 };
 
 
-static void runlength_algorithm_reset_t1_c1(struct runlength_algorithm_t1_c1 *algo)
+/* Chain-rate dependent run-length constants. Callers pass a constant
+   descriptor so the compiler can fold it into each specialized copy. */
+struct runlength_timing_t1_c1
+{
+    int bit_length;           // Nominal samples per bit, scaled by 256.
+    int min_run_length;       // Shorter runs reset the state machine.
+    unsigned deglitch_mask;   // Deglitch window of the newest raw bits.
+    const uint8_t *deglitch;  // Output state for each window value.
+    int pi_kp, pi_ki;         // Bit length controller gains, see below.
+};
+
+/* 800 kS/s: 8 samples per bit; at least 3 of the last 6 raw bits set. */
+static const struct runlength_timing_t1_c1 RUNLENGTH_TIMING_T1_C1 =
+{
+    .bit_length = 8 * 256, .min_run_length = 5,
+    .deglitch_mask = 0x3Fu, .deglitch = deglitch_filter_t1_c1,
+    .pi_kp = 32, .pi_ki = 16,
+};
+
+/* 400 kS/s C1 fast path: 4 samples per bit; majority of the last 3 raw bits.
+   A run must cover 3 of 4 samples, the 5 of 8 above rounded up. One sample
+   of timing jitter is twice the relative error at 4 samples per bit, so the
+   bit length controller gets half the proportional and a quarter of the
+   integral gain. */
+static const struct runlength_timing_t1_c1 RUNLENGTH_TIMING_C1_FAST =
+{
+    .bit_length = 4 * 256, .min_run_length = 3,
+    .deglitch_mask = 0x7u, .deglitch = deglitch_filter_c1_fast,
+    .pi_kp = 64, .pi_ki = 32,
+};
+
+
+static inline void runlength_algorithm_reset_timed_t1_c1(struct runlength_algorithm_t1_c1 *algo,
+                                                         const struct runlength_timing_t1_c1 *timing)
 {
     algo->run_length = 0;
-    algo->bit_length = 8 * 256;
+    algo->bit_length = timing->bit_length;
     algo->cum_run_length_error = 0;
     algo->state = 0u;
     algo->raw_bitstream = 0;
@@ -788,11 +846,18 @@ static void runlength_algorithm_reset_t1_c1(struct runlength_algorithm_t1_c1 *al
 }
 
 
-static void runlength_algorithm_t1_c1(unsigned raw_bit, unsigned rssi, struct runlength_algorithm_t1_c1 *algo)
+static void runlength_algorithm_reset_t1_c1(struct runlength_algorithm_t1_c1 *algo)
+{
+    runlength_algorithm_reset_timed_t1_c1(algo, &RUNLENGTH_TIMING_T1_C1);
+}
+
+
+static inline void runlength_algorithm_timed_t1_c1(unsigned raw_bit, unsigned rssi, struct runlength_algorithm_t1_c1 *algo,
+                                                   const struct runlength_timing_t1_c1 *timing)
 {
     algo->raw_bitstream = (algo->raw_bitstream << 1) | raw_bit;
 
-    const unsigned state = deglitch_filter_t1_c1[algo->raw_bitstream & 0x3Fu];
+    const unsigned state = timing->deglitch[algo->raw_bitstream & timing->deglitch_mask];
 
     // Edge detector.
     if (algo->state == state)
@@ -801,9 +866,9 @@ static void runlength_algorithm_t1_c1(unsigned raw_bit, unsigned rssi, struct ru
     }
     else
     {
-        if (algo->run_length < 5)
+        if (algo->run_length < timing->min_run_length)
         {
-            runlength_algorithm_reset_t1_c1(algo);
+            runlength_algorithm_reset_timed_t1_c1(algo, timing);
             algo->state = state;
             algo->run_length = 1;
             return;
@@ -817,7 +882,7 @@ static void runlength_algorithm_t1_c1(unsigned raw_bit, unsigned rssi, struct ru
 
         if (algo->run_length <= half_bit_length)
         {
-            runlength_algorithm_reset_t1_c1(algo);
+            runlength_algorithm_reset_timed_t1_c1(algo, timing);
             algo->state = state;
             algo->run_length = 1;
             return;
@@ -852,8 +917,8 @@ static void runlength_algorithm_t1_c1(unsigned raw_bit, unsigned rssi, struct ru
         // Some kind of PI controller is implemented below: u[n] = u[n-1] + Kp * e[n] + Ki * sum(e[0..n]).
         // Kp and Ki were found by experiment; e[n] := algo->run_length; u[[n] is the new bit length; u[n-1] is the last known bit length
         algo->cum_run_length_error += algo->run_length; // sum(e[0..n])
-        #define PI_KP  32
-        #define PI_KI  16
+        #define PI_KP  timing->pi_kp
+        #define PI_KI  timing->pi_ki
         //algo->bit_length += (algo->run_length / PI_KP + algo->cum_run_length_error / PI_KI) / num_of_bits_rx;
         algo->bit_length += (algo->run_length + algo->cum_run_length_error / PI_KI) / (PI_KP * num_of_bits_rx);
         #undef PI_KI
@@ -862,6 +927,12 @@ static void runlength_algorithm_t1_c1(unsigned raw_bit, unsigned rssi, struct ru
         algo->state = state;
         algo->run_length = 1;
     }
+}
+
+
+static void runlength_algorithm_t1_c1(unsigned raw_bit, unsigned rssi, struct runlength_algorithm_t1_c1 *algo)
+{
+    runlength_algorithm_timed_t1_c1(raw_bit, rssi, algo, &RUNLENGTH_TIMING_T1_C1);
 }
 
 
@@ -1332,11 +1403,147 @@ void s1_signal_chain_empty(float i_s1, float q_s1,
 {
 }
 
+/* --- C1 fast path chain at 400 kS/s; its filters keep their own state. --- */
+
+static inline float c1_fast_polar_discriminator(float i, float q)
+{
+    static float complex s_last;
+    const float complex s = i + q * _Complex_I;
+    const float complex y = s * conjf(s_last);
+    const float delta_phi = atan2_libm(y);
+
+    s_last = s;
+
+    return delta_phi;
+}
+
+static inline float c1_fast_polar_discriminator_inaccurate(float i, float q)
+{
+    // Imaginary part only, as polar_discriminator_t1_c1_inaccurate.
+    static float i_last, q_last;
+    const float delta_phi_imag = i_last*q - i*q_last;
+
+    i_last = i;
+    q_last = q;
+
+    return delta_phi_imag;
+}
+
+/* Same 100 kHz pass band and design method as the 800 kHz filter;
+   see filter/lp_fir_butter_400kHz_100kHz_160kHz.m. */
+static inline float lp_fir_butter_400kHz_100kHz_160kHz(float sample)
+{
+#define COEFFS 6
+    static float b[(COEFFS+1)/2] = {-0.00963706533, 0.0493523251, 0.4602847402, };
+    static float hist[COEFFS];
+
+    static FIRF_FILTER filter = {.length = COEFFS, .b = b, .hist = hist};
+#undef COEFFS
+
+    return firf_symmetric(sample, &filter);
+}
+
+static float c1_fast_remove_dc_offset_demod(float x)
+{
+  static float x_old, y_old;
+
+  y_old = (1.f + C1_FAST_DC_OFFSET_ALPHA)/2.f * (x - x_old) + C1_FAST_DC_OFFSET_ALPHA * y_old;
+  x_old = x;
+
+  return y_old;
+}
+
+static float c1_fast_rssi_filter(float sample)
+{
+    static float old_sample;
+
+    old_sample = C1_FAST_RSSI_ALPHA*sample + (1.0f - C1_FAST_RSSI_ALPHA)*old_sample;
+
+    return old_sample;
+}
+
+/* The 100 kHz symbol clock is fs/4: y[n] = x[n] - x[n-2] - r^2 y[n-2] has
+   poles at +-j*r and zeros at DC and fs/2; it replaces the three biquads.
+   See filter/bp_resonator_400kHz_100kHz.m. */
+static inline float bp_resonator_400kHz_100kHz(float sample)
+{
+    static float x1, x2, y1, y2;
+    const float y = sample - x2 - C1_FAST_CLOCK_POLE_RADIUS_SQUARED * y2;
+
+    x2 = x1;
+    x1 = sample;
+    y2 = y1;
+    y1 = y;
+
+    return y;
+}
+
+static void c1_fast_signal_chain(float i, float q,
+                                 struct time2_algorithm_t1_c1 *t2_algo,
+                                 struct runlength_algorithm_t1_c1 *rl_algo)
+{
+    static float old_clock;
+    static int clock_pending;
+
+    // Demodulate.
+    const float _delta_phi = opts_accurate_atan ? c1_fast_polar_discriminator(i, q)
+                                                : c1_fast_polar_discriminator_inaccurate(i, q);
+
+    // Post-filtering to prevent bit errors because of signal jitter.
+    float delta_phi = lp_fir_butter_400kHz_100kHz_160kHz(_delta_phi);
+    if (opts_remove_dc_offset) delta_phi = c1_fast_remove_dc_offset_demod(delta_phi);
+
+    // Get the bit!
+    const unsigned bit = (delta_phi >= 0) ? (1u<<PACKET_DATABIT_SHIFT) : (0u<<PACKET_DATABIT_SHIFT);
+
+    const float rssi = c1_fast_rssi_filter(sqrtf(i*i + q*q));
+
+    #if RUN_LENGTH_ALGORITHM_ENABLED
+    if (opts_run_length_algorithm_enabled)
+    {
+        runlength_algorithm_timed_t1_c1(bit, rssi, rl_algo, &RUNLENGTH_TIMING_C1_FAST);
+    }
+    #endif
+
+    #if TIME2_ALGORITHM_ENABLED
+    if (opts_time2_algorithm_enabled)
+    {
+        // Time-2 clock recovery as in t1_c1_signal_chain, with an fs/4
+        // resonator. The clock is high for about two of four samples per bit,
+        // too coarse to skip a fixed number of them. Interpolating the zero
+        // crossing between the last low and the first high sample instead:
+        // sample the data bit now if the crossing lies in the first half of
+        // that interval, otherwise one sample later.
+        const float clock = bp_resonator_400kHz_100kHz(delta_phi * delta_phi);
+
+        if (clock_pending)
+        {
+            clock_pending = 0;
+            time2_algorithm_t1_c1(bit, rssi, t2_algo);
+        }
+        else if (clock >= 0 && old_clock < 0)
+        {   // Clock signal rising edge detected.
+            if (old_clock + clock >= 0)
+            {
+                time2_algorithm_t1_c1(bit, rssi, t2_algo);
+            }
+            else
+            {
+                clock_pending = 1;
+            }
+        }
+        old_clock = clock;
+    }
+    #endif
+}
+
 /* C1 fast path input stage for one block of interleaved I/Q bytes:
    exact integer centering, or the one-sided -s shift at the input rate,
    followed by CIC decimation to 400 kS/s. */
 static void c1_fast_process_block(const uint8_t *samples, size_t length,
-                                  struct cic3_decimator *cic, int fs_kHz)
+                                  struct cic3_decimator *cic, int fs_kHz,
+                                  struct time2_algorithm_t1_c1 *t2_algo,
+                                  struct runlength_algorithm_t1_c1 *rl_algo)
 {
     for (size_t k = 0; k < length; k += 2)   // +2 : i and q interleaved
     {
@@ -1359,7 +1566,7 @@ static void c1_fast_process_block(const uint8_t *samples, size_t length,
         float i_fast, q_fast;
         if (cic3_decimate(cic, i, q, &i_fast, &q_fast))
         {
-            // No 400 kS/s chain consumes the samples yet.
+            c1_fast_signal_chain(i_fast, q_fast, t2_algo, rl_algo);
         }
     }
 }
@@ -1424,6 +1631,11 @@ int main(int argc, char *argv[])
 
     struct cic3_decimator c1_fast_decimator;
     cic3_reset(&c1_fast_decimator, opts_c1_fast_decimation_rate);
+    if (opts_c1_fast_decimation_rate)
+    {
+        // The fast path reuses the T1/C1 work areas with 4 samples per bit.
+        runlength_algorithm_reset_timed_t1_c1(&rl_algo_t1_c1, &RUNLENGTH_TIMING_C1_FAST);
+    }
 
     t1_c1_signal_chain_prototype process_t1_c1_chain = opts_t1_c1_processing_enabled ? t1_c1_signal_chain: t1_c1_signal_chain_empty;
     s1_signal_chain_prototype process_s1_chain = opts_s1_processing_enabled ? s1_signal_chain : s1_signal_chain_empty;
@@ -1468,7 +1680,8 @@ int main(int argc, char *argv[])
 
         if (opts_c1_fast_decimation_rate)
         {
-            c1_fast_process_block(samples, sizeof(samples), &c1_fast_decimator, fs_kHz);
+            c1_fast_process_block(samples, sizeof(samples), &c1_fast_decimator, fs_kHz,
+                                  &t2_algo_t1_c1, &rl_algo_t1_c1);
             continue;
         }
 

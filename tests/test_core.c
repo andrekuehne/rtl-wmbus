@@ -551,12 +551,410 @@ static int test_idle_decoders(void)
     return EXIT_SUCCESS;
 }
 
+/* Steady-state gain of a fixed real filter for a cosine at f / fs, by
+ * quadrature correlation over 4000 samples after settling.
+ */
+static double tone_gain(float (*filter)(float), double frequency, size_t settle)
+{
+    double re = 0, im = 0;
+    const size_t window = 4000;
+    for (size_t n = 0; n < settle + window; ++n)
+    {
+        const double w = 2 * M_PI * frequency * n;
+        const float y = filter((float)cos(w));
+        if (n < settle) continue;
+        re += y * cos(w);
+        im -= y * sin(w);
+    }
+    return (frequency == 0 ? 1 : 2) * hypot(re, im) / window;
+}
+
+static int test_c1_fast_fir(void)
+{
+    /* Flush, then read the impulse response through the production filter. */
+    for (size_t n = 0; n < 16; ++n) lp_fir_butter_400kHz_100kHz_160kHz(0);
+    float taps[8];
+    double sum = 0;
+    for (size_t n = 0; n < 8; ++n)
+    {
+        taps[n] = lp_fir_butter_400kHz_100kHz_160kHz(n == 0 ? 1.f : 0.f);
+        sum += taps[n];
+    }
+    CHECK(taps[6] == 0 && taps[7] == 0);
+    for (size_t n = 0; n < 3; ++n) CHECK(taps[n] == taps[5 - n]);
+    CHECK(fabs(sum - 1) <= 1e-3);
+    /* fs = 400 kHz: same pass band as the 800 kHz design (-4.8 dB at 100 kHz). */
+    const struct { double f, low_db, high_db; } bands[] = {
+        {0, -0.01, 0.01}, {50e3, -1.1, -0.8}, {100e3, -4.8, -4.2},
+        {160e3, -15.5, -13.5}, {199e3, -200, -40},
+    };
+    for (size_t b = 0; b < sizeof(bands) / sizeof(bands[0]); ++b)
+    {
+        const double db = 20 * log10(tone_gain(lp_fir_butter_400kHz_100kHz_160kHz, bands[b].f / 400e3, 64) + 1e-12);
+        CHECK(db >= bands[b].low_db && db <= bands[b].high_db);
+        printf("PASS fast FIR %.0f kHz: %.2f dB\n", bands[b].f / 1e3, db);
+    }
+    return EXIT_SUCCESS;
+}
+
+static int test_c1_fast_resonator(void)
+{
+    const double settle = 2000;
+    const double peak = tone_gain(bp_resonator_400kHz_100kHz, 0.25, settle);
+    const double r2 = C1_FAST_CLOCK_POLE_RADIUS_SQUARED;
+    CHECK(fabs(peak - 2 / (1 - r2)) <= 1e-3 * peak); // |H(fs/4)| = 2 / (1 - r^2)
+    for (double offset = 100; offset <= 10e3; offset *= 10)
+    {
+        CHECK(tone_gain(bp_resonator_400kHz_100kHz, 0.25 + offset / 400e3, settle) < peak);
+        CHECK(tone_gain(bp_resonator_400kHz_100kHz, 0.25 - offset / 400e3, settle) < peak);
+    }
+    /* 3 dB bandwidth by bisection on each side of the peak. */
+    double edge[2];
+    for (int side = 0; side < 2; ++side)
+    {
+        double inside = 0, outside = 20e3;
+        for (int k = 0; k < 30; ++k)
+        {
+            const double mid = (inside + outside) / 2;
+            const double f = 0.25 + (side ? mid : -mid) / 400e3;
+            if (tone_gain(bp_resonator_400kHz_100kHz, f, settle) >= peak / sqrt(2)) inside = mid;
+            else outside = mid;
+        }
+        edge[side] = inside;
+    }
+    const double bandwidth = edge[0] + edge[1];
+    CHECK(fabs(edge[0] - edge[1]) <= 20);
+    CHECK(bandwidth >= 1150 && bandwidth <= 1400);
+    /* Settling: impulse response envelope falls to 1/e after 1/(1 - r) samples. */
+    for (size_t n = 0; n < 4000; ++n) bp_resonator_400kHz_100kHz(0);
+    float start = 0, envelope = 0;
+    size_t settling = 0;
+    for (size_t n = 0; n < 1000 && !settling; ++n)
+    {
+        const float y = fabsf(bp_resonator_400kHz_100kHz(n == 0 ? 1.f : 0.f));
+        if (n < 4 && y > start) start = y;
+        if (n >= 4 && n % 4 == 0) envelope = 0;
+        if (y > envelope) envelope = y;
+        if (n >= 8 && n % 4 == 3 && envelope < start / M_E) settling = n;
+    }
+    const double tau = 1 / (1 - sqrt(r2));
+    CHECK(settling >= tau - 8 && settling <= tau + 8);
+    printf("PASS fast clock resonator: peak %.1f at fs/4, 3 dB bandwidth %.0f Hz, 1/e settling %zu samples (%.1f bits)\n",
+           peak, bandwidth, settling, settling / 4.0);
+    return EXIT_SUCCESS;
+}
+
+/* Original 800 kS/s run-length evaluator, kept as the reference for the
+ * samples-per-bit parametrization.
+ */
+static void reference_runlength_reset(struct runlength_algorithm_t1_c1 *algo)
+{
+    algo->run_length = 0;
+    algo->bit_length = 8 * 256;
+    algo->cum_run_length_error = 0;
+    algo->state = 0u;
+    algo->raw_bitstream = 0;
+    algo->bitstream = 0;
+    reset_t1_c1_packet_decoder(&algo->decoder);
+}
+
+static void reference_runlength(unsigned raw_bit, unsigned rssi, struct runlength_algorithm_t1_c1 *algo)
+{
+    algo->raw_bitstream = (algo->raw_bitstream << 1) | raw_bit;
+    const unsigned state = deglitch_filter_t1_c1[algo->raw_bitstream & 0x3Fu];
+    if (algo->state == state)
+    {
+        algo->run_length++;
+        return;
+    }
+    if (algo->run_length < 5)
+    {
+        reference_runlength_reset(algo);
+        algo->state = state;
+        algo->run_length = 1;
+        return;
+    }
+    algo->run_length *= 256;
+    const int half_bit_length = algo->bit_length / 2;
+    if (algo->run_length <= half_bit_length)
+    {
+        reference_runlength_reset(algo);
+        algo->state = state;
+        algo->run_length = 1;
+        return;
+    }
+    int num_of_bits_rx;
+    for (num_of_bits_rx = 0; algo->run_length > half_bit_length; num_of_bits_rx++)
+    {
+        algo->run_length -= algo->bit_length;
+        unsigned bit = algo->state;
+        algo->bitstream = (algo->bitstream << 1) | bit;
+        if (count_set_bits((algo->bitstream & ACCESS_CODE_T1_C1_BITMASK) ^ ACCESS_CODE_T1_C1) <= ACCESS_CODE_T1_C1_ERRORS)
+            bit |= (1u<<PACKET_PREAMBLE_DETECTED_SHIFT);
+        t1_c1_packet_decoder(bit, rssi, &algo->decoder, "rla;");
+    }
+    algo->cum_run_length_error += algo->run_length;
+    algo->bit_length += (algo->run_length + algo->cum_run_length_error / 16) / (32 * num_of_bits_rx);
+    algo->state = state;
+    algo->run_length = 1;
+}
+
+/* C1 mode A test frame (L = 25: two CRC blocks) whose data block holds runs
+ * of exactly 16 zeros and 16 ones, as in 0x0000 and 0xFFFF data words.
+ */
+static size_t c1_test_frame_bits(uint8_t *bits, uint32_t serial, char *payload_hex)
+{
+    uint8_t data[30] = {25, 0x44, 0x2d, 0x2c,
+                        serial & 255u, (serial >> 8) & 255u, (serial >> 16) & 255u, serial >> 24,
+                        0x1b, 0x16};
+    uint8_t block[16] = {0x55, 0x00, 0x00, 0xaa, 0xff, 0xff, 0x55, 0x7a, 0x01, 0x80, 0x3c, 0xc3, 0x0f, 0xf0, 0x5a, 0xa5};
+    uint16_t crc = calc_crc_wmbus(data, 10);
+    data[10] = crc >> 8;
+    data[11] = crc & 255u;
+    memcpy(&data[12], block, 16);
+    crc = calc_crc_wmbus(&data[12], 16);
+    data[28] = crc >> 8;
+    data[29] = crc & 255u;
+    size_t n = 0;
+    for (unsigned k = 0; k < 32; ++k) bits[n++] = k & 1u;
+    const unsigned words[2] = {0x543D, 0x54CD};
+    for (unsigned w = 0; w < 2; ++w)
+        for (unsigned k = 16; k-- > 0;) bits[n++] = (words[w] >> k) & 1u;
+    for (unsigned byte = 0; byte < sizeof(data); ++byte)
+        for (unsigned k = 8; k-- > 0;) bits[n++] = (data[byte] >> k) & 1u;
+    for (unsigned k = 0; k < 8; ++k) bits[n++] = k & 1u;
+    char *out = payload_hex;
+    out += sprintf(out, "0x");
+    for (unsigned byte = 0; byte < 10; ++byte) out += sprintf(out, "%02x", data[byte]);
+    for (unsigned byte = 12; byte < 28; ++byte) out += sprintf(out, "%02x", data[byte]);
+    return n;
+}
+
+/* Expand bits to chips of samples_per_bit samples with timing jitter: every
+ * edge falls up to window samples after its nominal sample, so a run of m bits
+ * lasts m * samples_per_bit +- window samples. At 4 samples per bit, window 1
+ * is +-1 sample; two samples short would be the half-bit decision tie.
+ */
+static size_t jittered_chips(const uint8_t *bits, size_t count, uint8_t *chips, uint32_t *random,
+                             int samples_per_bit, int window)
+{
+    size_t n = 0;
+    int offset = 0;
+    for (size_t k = 0; k < count; ++k)
+    {
+        *random = *random * UINT32_C(1664525) + UINT32_C(1013904223);
+        const int next = (int)((*random >> 16) % (unsigned)(window + 1));
+        const int length = samples_per_bit + next - offset;
+        for (int s = 0; s < length; ++s) chips[n++] = bits[k];
+        offset = next;
+    }
+    return n;
+}
+
+static int count_rows(FILE *output, const char *prefix, uint32_t serial, const char *payload, unsigned *crc_ok)
+{
+    char line[1024], serial_text[16];
+    int rows = 0;
+    snprintf(serial_text, sizeof(serial_text), ";%08X;", (unsigned)serial);
+    rewind(output);
+    while (fgets(line, sizeof(line), output))
+    {
+        if (strncmp(line, prefix, strlen(prefix)) || !strstr(line, serial_text)) continue;
+        ++rows;
+        const char *last = strrchr(line, ';');
+        if (strncmp(line + strlen(prefix), "C1;1;1;", 7) == 0 && last &&
+            strncmp(last + 1, payload, strlen(payload)) == 0) ++*crc_ok;
+    }
+    return rows;
+}
+
+/* NRZ FSK (+-45 kHz) through a chain; edges fall half a sample after the
+ * jittered sample grid, so samples spanning an edge mix both frequencies.
+ */
+static void fsk_frames(int fast, uint32_t base, unsigned frames, int window, uint32_t *random,
+                       struct time2_algorithm_t1_c1 *t2, struct runlength_algorithm_t1_c1 *rl)
+{
+    static uint8_t bits[512], chips[8192];
+    char payload[128];
+    const int samples_per_bit = fast ? 4 : 8;
+    const double rate = fast ? 400e3 : 800e3;
+    double phase = 0;
+    for (unsigned f = 0; f < frames; ++f)
+    {
+        const size_t count = c1_test_frame_bits(bits, base + f, payload);
+        const size_t length = jittered_chips(bits, count, chips, random, samples_per_bit, window);
+        const size_t lead = 100 * samples_per_bit;
+        for (size_t n = 0; n < lead + length + lead / 2; ++n)
+        {
+            const int on = n >= lead && n < lead + length;
+            if (on)
+            {
+                const size_t k = n - lead;
+                const double now = chips[k] ? 1 : -1;
+                const double before = k ? (chips[k - 1] ? 1 : -1) : now;
+                phase += 2 * M_PI * 45e3 * (now + before) / 2 / rate;
+            }
+            const float i = on ? 40 * (float)cos(phase) : 0.f;
+            const float q = on ? 40 * (float)sin(phase) : 0.f;
+            if (fast) c1_fast_signal_chain(i, q, t2, rl);
+            else t1_c1_signal_chain(i, q, t2, rl, polar_discriminator_t1_c1);
+        }
+    }
+}
+
+static void frame_results(FILE *output, uint32_t base, unsigned frames, unsigned *rla, unsigned *t2a)
+{
+    static uint8_t bits[512];
+    char payload[128];
+    for (unsigned f = 0; f < frames; ++f)
+    {
+        c1_test_frame_bits(bits, base + f, payload);
+        count_rows(output, "rla;", base + f, payload, rla);
+        count_rows(output, "t2a;", base + f, payload, t2a);
+    }
+}
+
+static int test_c1_fast_bit_recovery(void)
+{
+    static uint8_t bits[512], chips[4096];
+    char payload[128];
+    const unsigned frames = 64;
+    uint32_t random = 27;
+    FILE *output = tmpfile();
+    CHECK(output != NULL);
+    fflush(stdout);
+    const int saved_stdout = dup(STDOUT_FILENO);
+    CHECK(saved_stdout >= 0);
+    CHECK(dup2(fileno(output), STDOUT_FILENO) >= 0);
+    opts_show_used_algorithm = 1;
+    opts_remove_dc_offset = 0;
+
+    /* Run-length path on raw sliced bits, +-1 sample of jitter. */
+    struct runlength_algorithm_t1_c1 rl;
+    runlength_algorithm_reset_timed_t1_c1(&rl, &RUNLENGTH_TIMING_C1_FAST);
+    for (unsigned f = 0; f < frames; ++f)
+    {
+        const size_t count = c1_test_frame_bits(bits, 0x27100000u + f, payload);
+        const size_t length = jittered_chips(bits, count, chips, &random, 4, 1);
+        for (size_t n = 0; n < 40 + f % 4; ++n) runlength_algorithm_timed_t1_c1(n & 1u, 40, &rl, &RUNLENGTH_TIMING_C1_FAST);
+        for (size_t n = 0; n < length; ++n) runlength_algorithm_timed_t1_c1(chips[n], 40, &rl, &RUNLENGTH_TIMING_C1_FAST);
+    }
+
+    /* Both paths through the 400 kS/s chain without and with +-1 sample of
+     * jitter, and the 800 kS/s chain with the same relative (+-2 sample) jitter.
+     */
+    struct time2_algorithm_t1_c1 t2;
+    time2_algorithm_t1_c1_reset(&t2);
+    runlength_algorithm_reset_timed_t1_c1(&rl, &RUNLENGTH_TIMING_C1_FAST);
+    fsk_frames(1, 0x27200000u, frames, 0, &random, &t2, &rl);
+    fsk_frames(1, 0x27300000u, frames, 1, &random, &t2, &rl);
+    struct time2_algorithm_t1_c1 t2_800;
+    struct runlength_algorithm_t1_c1 rl_800;
+    time2_algorithm_t1_c1_reset(&t2_800);
+    runlength_algorithm_reset_t1_c1(&rl_800);
+    fsk_frames(0, 0x27400000u, frames, 2, &random, &t2_800, &rl_800);
+
+    fflush(stdout);
+    CHECK(dup2(saved_stdout, STDOUT_FILENO) >= 0);
+    close(saved_stdout);
+    opts_show_used_algorithm = 0;
+
+    unsigned raw = 0, clean[2] = {0, 0}, jitter[2] = {0, 0}, reference[2] = {0, 0}, unused = 0;
+    frame_results(output, 0x27100000u, frames, &raw, &unused);
+    frame_results(output, 0x27200000u, frames, &clean[0], &clean[1]);
+    frame_results(output, 0x27300000u, frames, &jitter[0], &jitter[1]);
+    frame_results(output, 0x27400000u, frames, &reference[0], &reference[1]);
+    fclose(output);
+    printf("PASS fast bit recovery, CRC-OK frames of %u with 16-bit runs: raw-bit run-length +-1 jitter %u; "
+           "chain run-length/time2 %u/%u, +-1 jitter %u/%u; 800 kS/s chain +-2 jitter %u/%u\n",
+           frames, raw, clean[0], clean[1], jitter[0], jitter[1], reference[0], reference[1]);
+    CHECK(raw == frames && clean[0] == frames && clean[1] == frames && jitter[1] == frames);
+    CHECK(jitter[0] >= reference[0] && jitter[1] >= reference[1]);
+    return EXIT_SUCCESS;
+}
+
+/* The 8-samples-per-bit descriptor reproduces the original evaluator state
+ * after every raw bit, including all resets and decoded frames.
+ */
+static int test_runlength_parametrization(void)
+{
+    static struct runlength_algorithm_t1_c1 reference, candidate;
+    static uint8_t bits[512];
+    char payload[128];
+    FILE *output = tmpfile();
+    CHECK(output != NULL);
+    fflush(stdout);
+    const int saved_stdout = dup(STDOUT_FILENO);
+    CHECK(saved_stdout >= 0);
+    CHECK(dup2(fileno(output), STDOUT_FILENO) >= 0);
+    memset(&reference, 0x5a, sizeof(reference));
+    memset(&candidate, 0x5a, sizeof(candidate));
+    reference_runlength_reset(&reference);
+    runlength_algorithm_reset_t1_c1(&candidate);
+    CHECK(memcmp(&reference, &candidate, sizeof(reference)) == 0);
+    uint32_t random = 3;
+    unsigned frames = 0;
+    for (unsigned block = 0; block < 400; ++block)
+    {
+        if (block % 4 == 0)
+        {
+            /* A frame at 8 samples per bit with +-1 sample of edge jitter. */
+            const size_t count = c1_test_frame_bits(bits, 0x28000000u + block, payload);
+            int offset = 0;
+            for (size_t k = 0; k < count; ++k)
+            {
+                random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+                const int next = (int)((random >> 16) % 3) - 1;
+                for (int s = 0; s < 8 + next - offset; ++s)
+                {
+                    reference_runlength(bits[k], 40, &reference);
+                    runlength_algorithm_t1_c1(bits[k], 40, &candidate);
+                    CHECK(memcmp(&reference, &candidate, sizeof(reference)) == 0);
+                }
+                offset = next;
+            }
+            ++frames;
+            continue;
+        }
+        for (unsigned n = 0; n < 2048; ++n)
+        {
+            random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+            /* Noise, glitches and runs of every length, low and high RSSI. */
+            const unsigned bit = block % 4 == 1 ? random >> 31 : (n / (1 + (random >> 29) + block % 9)) & 1u;
+            const unsigned rssi = (random >> 8) % 12;
+            reference_runlength(bit, rssi, &reference);
+            runlength_algorithm_t1_c1(bit, rssi, &candidate);
+            CHECK(memcmp(&reference, &candidate, sizeof(reference)) == 0);
+        }
+    }
+    fflush(stdout);
+    CHECK(dup2(saved_stdout, STDOUT_FILENO) >= 0);
+    close(saved_stdout);
+    rewind(output);
+    char reference_line[1024], candidate_line[1024];
+    unsigned rows = 0;
+    while (fgets(reference_line, sizeof(reference_line), output))
+    {
+        CHECK(fgets(candidate_line, sizeof(candidate_line), output) != NULL);
+        erase_test_timestamp(reference_line);
+        erase_test_timestamp(candidate_line);
+        CHECK(strcmp(reference_line, candidate_line) == 0);
+        ++rows;
+    }
+    fclose(output);
+    CHECK(rows >= frames);
+    printf("PASS 8-samples-per-bit run-length parametrization: identical state after every bit, %u output pairs\n", rows);
+    return EXIT_SUCCESS;
+}
+
 int main(void)
 {
     if (test_crc() || test_manchester() || test_filters() ||
         test_fixed_moving_average(8, moving_average_t1_c1) ||
         test_fixed_moving_average(16, moving_average_s1) ||
-        test_symmetric_filters() || test_cic3() || test_idle_decoders()) return EXIT_FAILURE;
+        test_symmetric_filters() || test_cic3() || test_idle_decoders() ||
+        test_c1_fast_fir() || test_c1_fast_resonator() || test_runlength_parametrization() ||
+        test_c1_fast_bit_recovery()) return EXIT_FAILURE;
     puts("PASS CRC, Manchester, moving average, and FIR checks");
     return EXIT_SUCCESS;
 }
