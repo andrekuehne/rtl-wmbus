@@ -1024,21 +1024,18 @@ static void shift_freq_plus_minus325(float *iplus, float *qplus, float *iminus, 
     *qminus = qx - iz;
 }
 
-typedef void (*t1_c1_signal_chain_prototype)(float i_t1_c1, float q_t1_c1,
-                                             struct time2_algorithm_t1_c1 *t2_algo_t1_c1,
-                                             struct runlength_algorithm_t1_c1 *rl_algo_t1_c1,
-                                             float (*polar_discriminator_t1_c1_function)(float i, float q));
-
 void t1_c1_signal_chain(float i_t1_c1, float q_t1_c1,
                         struct time2_algorithm_t1_c1 *t2_algo_t1_c1,
                         struct runlength_algorithm_t1_c1 *rl_algo_t1_c1,
-                        float (*polar_discriminator_t1_c1_function)(float i, float q))
+                        int accurate_atan)
 {
     static int16_t old_clock_t1_c1 = INT16_MIN;
     static unsigned clock_lock_t1_c1 = 0;
 
     // Demodulate.
-    const float _delta_phi_t1_c1 = polar_discriminator_t1_c1_function(i_t1_c1, q_t1_c1);
+    const float _delta_phi_t1_c1 = accurate_atan
+        ? polar_discriminator_t1_c1(i_t1_c1, q_t1_c1)
+        : polar_discriminator_t1_c1_inaccurate(i_t1_c1, q_t1_c1);
     //int16_t demodulated_signal = (INT16_MAX-1)*delta_phi;
     //fwrite(&demodulated_signal, sizeof(demodulated_signal), 1, demod_out);
 
@@ -1109,28 +1106,18 @@ void t1_c1_signal_chain(float i_t1_c1, float q_t1_c1,
     // --- time2 algorithm section end ---
 }
 
-void t1_c1_signal_chain_empty(float i_t1_c1, float q_t1_c1,
-                              struct time2_algorithm_t1_c1 *t2_algo_t1_c1,
-                              struct runlength_algorithm_t1_c1 *rl_algo_t1_c1,
-                              float (*polar_discriminator_t1_c1_function)(float i, float q))
-{
-}
-
-typedef void (*s1_signal_chain_prototype)(float i_s1, float q_s1,
-                                          struct time2_algorithm_s1 *t2_algo_s1,
-                                          struct runlength_algorithm_s1 *rl_algo_s1,
-                                          float (*polar_discriminator_s1_function)(float i, float q));
-
 void s1_signal_chain(float i_s1, float q_s1,
                       struct time2_algorithm_s1 *t2_algo_s1,
                       struct runlength_algorithm_s1 *rl_algo_s1,
-                      float (*polar_discriminator_s1_function)(float i, float q))
+                      int accurate_atan)
 {
     static int16_t old_clock_s1 = INT16_MIN;
     static unsigned clock_lock_s1 = 0;
 
     // Demodulate.
-    const float _delta_phi_s1 = polar_discriminator_s1_function(i_s1, q_s1);
+    const float _delta_phi_s1 = accurate_atan
+        ? polar_discriminator_s1(i_s1, q_s1)
+        : polar_discriminator_s1_inaccurate(i_s1, q_s1);
     //int16_t demodulated_signal = (INT16_MAX-1)*delta_phi;
     //fwrite(&demodulated_signal, sizeof(demodulated_signal), 1, demod_out);
 
@@ -1201,13 +1188,6 @@ void s1_signal_chain(float i_s1, float q_s1,
     // --- time2 algorithm section end ---
 }
 
-void s1_signal_chain_empty(float i_s1, float q_s1,
-                           struct time2_algorithm_s1 *t2_algo_s1,
-                           struct runlength_algorithm_s1 *rl_algo_s1,
-                           float (*polar_discriminator_s1_function)(float i, float q))
-{
-}
-
 int main(int argc, char *argv[])
 {
     #if WINDOWS_BUILD == 1
@@ -1247,6 +1227,7 @@ int main(int argc, char *argv[])
     enum { PROCESS_T1_C1 = 1, PROCESS_S1 = 2 };
     const unsigned enabled_modes = (opts_t1_c1_processing_enabled ? PROCESS_T1_C1 : 0)
                                  | (opts_s1_processing_enabled ? PROCESS_S1 : 0);
+    const int accurate_atan = opts_accurate_atan;
     const int both_modes_enabled = enabled_modes == (PROCESS_T1_C1 | PROCESS_S1);
 
 
@@ -1263,12 +1244,6 @@ int main(int argc, char *argv[])
 
     struct runlength_algorithm_s1 rl_algo_s1;
     runlength_algorithm_reset_s1(&rl_algo_s1);
-
-    t1_c1_signal_chain_prototype process_t1_c1_chain = opts_t1_c1_processing_enabled ? t1_c1_signal_chain: t1_c1_signal_chain_empty;
-    s1_signal_chain_prototype process_s1_chain = opts_s1_processing_enabled ? s1_signal_chain : s1_signal_chain_empty;
-
-    float (*polar_discriminator_t1_c1_function)(float i, float q) = opts_accurate_atan ? polar_discriminator_t1_c1 : polar_discriminator_t1_c1_inaccurate;
-    float (*polar_discriminator_s1_function)(float i, float q) = opts_accurate_atan ? polar_discriminator_s1 : polar_discriminator_s1_inaccurate;
 
     FILE *input = stdin;
     //input = fopen("samples/samples2.bin", "rb");
@@ -1363,9 +1338,9 @@ int main(int argc, char *argv[])
             decimation_rate_index = 0;
 
             if (enabled_modes & PROCESS_T1_C1)
-                process_t1_c1_chain(i_t1_c1, q_t1_c1, &t2_algo_t1_c1, &rl_algo_t1_c1, polar_discriminator_t1_c1_function);
+                t1_c1_signal_chain(i_t1_c1, q_t1_c1, &t2_algo_t1_c1, &rl_algo_t1_c1, accurate_atan);
             if (enabled_modes & PROCESS_S1)
-                process_s1_chain(i_s1, q_s1, &t2_algo_s1, &rl_algo_s1, polar_discriminator_s1_function);
+                s1_signal_chain(i_s1, q_s1, &t2_algo_s1, &rl_algo_s1, accurate_atan);
         }
     }
 

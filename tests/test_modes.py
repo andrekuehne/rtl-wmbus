@@ -69,6 +69,34 @@ class ModeChecks(unittest.TestCase):
                     self.check_result(subprocess.CompletedProcess(process.args, process.returncode,
                                                                   stdout, stderr), wanted)
 
+    def test_dispatch_options_preserve_fragmented_stream(self):
+        # Exercise both discriminator choices and each decoder algorithm across
+        # block boundaries without restarting their persistent histories.
+        for case in CASES:
+            data, _ = fixture(case)
+            for discriminator in ([], ["-a"]):
+                for algorithm in ([], ["-r", "0"], ["-t", "0"]):
+                    options = case["options"] + discriminator + algorithm
+                    with self.subTest(case=case["name"], options=options):
+                        reference = subprocess.run([str(BINARY)] + options, input=data,
+                                                   capture_output=True, env=ENV, timeout=60)
+                        self.assertEqual(reference.returncode, 0)
+                        self.assertEqual(reference.stderr, b"")
+                        with subprocess.Popen([str(BINARY)] + options,
+                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                              stderr=subprocess.PIPE, env=ENV) as process:
+                            # fread must keep waiting for a complete block;
+                            # the odd partial final block remains unprocessed.
+                            stream = data + bytes([0, 255]) * 2047 + b"\xff"
+                            for offset in range(0, len(stream), 997):
+                                process.stdin.write(stream[offset:offset + 997])
+                            process.stdin.close()
+                            process.stdin = None
+                            stdout, stderr = process.communicate(timeout=60)
+                            self.check_result(subprocess.CompletedProcess(
+                                process.args, process.returncode, stdout, stderr),
+                                normalize(reference.stdout))
+
     @unittest.skipUnless(os.name == "posix", "POSIX flow monitoring")
     def test_flow_monitor_still_reads_disabled_mode_stream(self):
         case = next(case for case in CASES if case["name"] == "tracked-issue48")
