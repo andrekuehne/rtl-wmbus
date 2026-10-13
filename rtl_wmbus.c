@@ -94,6 +94,12 @@ static void sig_alarm_handler(int signo)
 #define S1_DC_OFFSET_ALPHA 0.999f
 #endif
 
+/* Opt-in C1 fast path (-c R): decimate the R * 400 kS/s input by R and run
+   the T1/C1 chain at 400 kS/s, four samples per 100 kcps chip. */
+#define C1_FAST_SAMPLE_RATE_KHZ 400
+#define C1_FAST_MIN_DECIMATION_RATE 3u // 1.2 MS/s, lowest RTL-SDR rate above 900 kS/s
+#define C1_FAST_MAX_DECIMATION_RATE 8u // 3.2 MS/s, highest RTL-SDR rate
+
 static const uint32_t ACCESS_CODE_T1_C1 = 0x543d;
 static const uint32_t ACCESS_CODE_T1_C1_BITMASK = 0xFFFFu;
 static const unsigned ACCESS_CODE_T1_C1_ERRORS = 0u; // 0 if no errors allowed
@@ -186,6 +192,68 @@ static inline float moving_average_s1(float sample, size_t i_or_q)
     return mavgi_power_of_two(sample, i_or_q ? q_hist : i_hist,
                              &filter[i_or_q], COEFFS);
 #undef COEFFS
+}
+
+/* Integer value of (float)u - 127.5f truncated toward zero, as the moving
+   averages receive it: 0..127 -> -127..0 and 128..255 -> 0..127. */
+static inline int center_sample(uint8_t u)
+{
+    return (int)u - 127 - (int)(u >> 7);
+}
+
+/* Three-stage CIC decimator (stage length R, differential delay 1) for I/Q.
+   Unsigned accumulators wrap modulo 2^32, which keeps the integrator-comb form
+   exact: the 3*log2(R) <= 9 bits of growth fit easily. The decimation phase
+   is carried across input blocks. */
+struct cic3_decimator
+{
+    uint32_t integrator[2][3]; // i/q
+    uint32_t comb[2][3];       // i/q: previous comb inputs
+    unsigned phase;
+    unsigned rate;
+    float scale;               // 1 / R^3: unity DC gain
+};
+
+static void cic3_reset(struct cic3_decimator *cic, unsigned rate)
+{
+    memset(cic, 0, sizeof(*cic));
+    cic->rate = rate;
+    cic->scale = 1.0f / (float)(rate * rate * rate);
+}
+
+/* Two's complement value of a wrapped accumulator difference. */
+static inline int32_t cic3_signed(uint32_t value)
+{
+    return value <= (uint32_t)INT32_MAX ? (int32_t)value : -(int32_t)(~value) - 1;
+}
+
+static inline float cic3_comb(uint32_t *comb, uint32_t sample, float scale)
+{
+    for (size_t stage = 0; stage < 3; stage++)
+    {
+        const uint32_t previous = comb[stage];
+        comb[stage] = sample;
+        sample -= previous;
+    }
+    const int32_t value = cic3_signed(sample);
+    return (float)value * scale;
+}
+
+/* Returns 1 and the decimated sample on every R-th input sample. */
+static inline int cic3_decimate(struct cic3_decimator *cic, int i, int q, float *i_out, float *q_out)
+{
+    uint32_t *const ii = cic->integrator[0];
+    uint32_t *const qi = cic->integrator[1];
+
+    ii[0] += (uint32_t)i; ii[1] += ii[0]; ii[2] += ii[1];
+    qi[0] += (uint32_t)q; qi[1] += qi[0]; qi[2] += qi[1];
+
+    if (++cic->phase < cic->rate) return 0;
+    cic->phase = 0;
+
+    *i_out = cic3_comb(cic->comb[0], ii[2], cic->scale);
+    *q_out = cic3_comb(cic->comb[1], qi[2], cic->scale);
+    return 1;
 }
 
 static inline float lp_fir_butter_1600kHz_160kHz_200kHz_t1_c1(float sample, size_t i_or_q)
@@ -856,6 +924,7 @@ int opts_show_used_algorithm = 0;
 static int opts_t1_c1_processing_enabled = 1;
 static int opts_s1_processing_enabled = 1;
 static int opts_check_flow = 0;
+static unsigned opts_c1_fast_decimation_rate = 0u; // 0: off; else input rate / 400 kHz.
 static const unsigned opts_CLOCK_LOCK_THRESHOLD_T1_C1 = 2; // Is not implemented as option yet.
 static const unsigned opts_CLOCK_LOCK_THRESHOLD_S1 = 2; // Is not implemented as option yet.
 
@@ -883,14 +952,34 @@ static void print_version(void)
     fprintf(stdout, COMMIT "\n");
 }
 
+__attribute__((__noreturn__))
+static void usage_error(const char *program_name, const char *message)
+{
+    fprintf(stderr, "rtl_wmbus: %s\n", message);
+    print_usage(program_name);
+    exit(EXIT_FAILURE);
+}
+
 static void process_options(int argc, char *argv[])
 {
     int option;
+    int decimation_rate_set = 0;
 
-    while ((option = getopt(argc, argv, "ofad:p:r:vVst:")) != -1)
+    while ((option = getopt(argc, argv, "ofad:p:r:vVst:c:")) != -1)
     {
         switch (option)
         {
+        case 'c':
+        {
+            char *end;
+            const unsigned long rate = strtoul(optarg, &end, 10);
+            if (end == optarg || *end != '\0' || rate < C1_FAST_MIN_DECIMATION_RATE || rate > C1_FAST_MAX_DECIMATION_RATE)
+            {
+                usage_error(argv[0], "-c needs the input rate divided by 400 kHz (3 to 8)");
+            }
+            opts_c1_fast_decimation_rate = (unsigned)rate;
+            break;
+        }
         case 'o':
           opts_remove_dc_offset = 1;
           break;
@@ -942,6 +1031,7 @@ static void process_options(int argc, char *argv[])
             break;
         case 'd':
             opts_decimation_rate = strtoul(optarg, NULL, 10);
+            decimation_rate_set = 1;
             break;
         case 's':
             opts_s1_t1_c1_simultaneously = 1;
@@ -957,6 +1047,19 @@ static void process_options(int argc, char *argv[])
             print_usage(argv[0]);
             exit(EXIT_FAILURE);
         }
+    }
+
+    if (opts_c1_fast_decimation_rate)
+    {
+        if (decimation_rate_set)
+        {
+            usage_error(argv[0], "-c sets its own decimation and cannot be combined with -d");
+        }
+        if (!opts_t1_c1_processing_enabled)
+        {
+            usage_error(argv[0], "-c receives T1/C1 only and cannot be combined with -p T");
+        }
+        opts_s1_processing_enabled = 0; // The fast path has no S1 chain.
     }
 }
 
@@ -1022,6 +1125,27 @@ static void shift_freq_plus_minus325(float *iplus, float *qplus, float *iminus, 
     // Symmetric negative shift .
     *iminus = ix + qz;
     *qminus = qx - iz;
+}
+
+/* One-sided +325 kHz shift for the C1 fast path, which has no S1 chain. */
+static void shift_freq_plus325(float *i, float *q, int fs_kHz)
+{
+    const int ft = 325;
+    static size_t n = 0;
+    const size_t n_max = fs_kHz/FREQ_STEP_KHZ;
+    const float x = LUT_FREQUENCY_TRANSLATION_PLUS_COSINE[n];
+    const float z = LUT_FREQUENCY_TRANSLATION_PLUS_SINE[n];
+    n += ft/FREQ_STEP_KHZ;
+    if (n >= n_max) n -= n_max;
+
+    const float ix = *i * x;
+    const float qx = *q * x;
+    const float iz = *i * z;
+    const float qz = *q * z;
+
+    // Same positive rotation as shift_freq_plus_minus325.
+    *i = ix - qz;
+    *q = qx + iz;
 }
 
 typedef void (*t1_c1_signal_chain_prototype)(float i_t1_c1, float q_t1_c1,
@@ -1208,6 +1332,38 @@ void s1_signal_chain_empty(float i_s1, float q_s1,
 {
 }
 
+/* C1 fast path input stage for one block of interleaved I/Q bytes:
+   exact integer centering, or the one-sided -s shift at the input rate,
+   followed by CIC decimation to 400 kS/s. */
+static void c1_fast_process_block(const uint8_t *samples, size_t length,
+                                  struct cic3_decimator *cic, int fs_kHz)
+{
+    for (size_t k = 0; k < length; k += 2)   // +2 : i and q interleaved
+    {
+        int i, q;
+
+        if (opts_s1_t1_c1_simultaneously)
+        {
+            float i_shifted = (float)samples[k] - 127.5f;
+            float q_shifted = (float)samples[k + 1] - 127.5f;
+            shift_freq_plus325(&i_shifted, &q_shifted, fs_kHz);
+            i = (int)i_shifted; // Truncate like the moving averages.
+            q = (int)q_shifted;
+        }
+        else
+        {
+            i = center_sample(samples[k]);
+            q = center_sample(samples[k + 1]);
+        }
+
+        float i_fast, q_fast;
+        if (cic3_decimate(cic, i, q, &i_fast, &q_fast))
+        {
+            // No 400 kS/s chain consumes the samples yet.
+        }
+    }
+}
+
 int main(int argc, char *argv[])
 {
     #if WINDOWS_BUILD == 1
@@ -1241,7 +1397,9 @@ int main(int argc, char *argv[])
 #endif
 
     __attribute__((__aligned__(16))) uint8_t samples[4096];
-    const int fs_kHz = opts_decimation_rate*800; // Sample rate [kHz] as a multiple of 800 kHz.
+    const int fs_kHz = opts_c1_fast_decimation_rate
+                     ? (int)opts_c1_fast_decimation_rate*C1_FAST_SAMPLE_RATE_KHZ // Multiple of 400 kHz.
+                     : (int)opts_decimation_rate*800; // Sample rate [kHz] as a multiple of 800 kHz.
     float i_t1_c1 = 0.f, q_t1_c1 = 0.f;
     float i_s1 = 0.f, q_s1 = 0.f;
     enum { PROCESS_T1_C1 = 1, PROCESS_S1 = 2 };
@@ -1263,6 +1421,9 @@ int main(int argc, char *argv[])
 
     struct runlength_algorithm_s1 rl_algo_s1;
     runlength_algorithm_reset_s1(&rl_algo_s1);
+
+    struct cic3_decimator c1_fast_decimator;
+    cic3_reset(&c1_fast_decimator, opts_c1_fast_decimation_rate);
 
     t1_c1_signal_chain_prototype process_t1_c1_chain = opts_t1_c1_processing_enabled ? t1_c1_signal_chain: t1_c1_signal_chain_empty;
     s1_signal_chain_prototype process_s1_chain = opts_s1_processing_enabled ? s1_signal_chain : s1_signal_chain_empty;
@@ -1303,6 +1464,12 @@ int main(int argc, char *argv[])
         {
             // End of file?..
             break;
+        }
+
+        if (opts_c1_fast_decimation_rate)
+        {
+            c1_fast_process_block(samples, sizeof(samples), &c1_fast_decimator, fs_kHz);
+            continue;
         }
 
         for (size_t k = 0; k < sizeof(samples)/sizeof(samples[0]); k += 2)   // +2 : i and q interleaved

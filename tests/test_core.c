@@ -202,6 +202,157 @@ static int test_symmetric_filters(void)
     return EXIT_SUCCESS;
 }
 
+/* Full-rate reference for the C1 fast-path decimator: the three-fold
+ * convolution of length-R boxcars, evaluated directly in 64-bit integers.
+ */
+static size_t cic3_reference_taps(unsigned rate, int64_t *taps)
+{
+    const size_t length = 3 * (rate - 1) + 1;
+    int64_t box[3 * 8] = {0}, next[3 * 8];
+    box[0] = 1;
+    for (unsigned stage = 0; stage < 3; ++stage)
+    {
+        memset(next, 0, sizeof(next));
+        for (size_t n = 0; n < length; ++n)
+            for (unsigned k = 0; k < rate && k <= n; ++k)
+                next[n] += box[n - k];
+        memcpy(box, next, sizeof(box));
+    }
+    memcpy(taps, box, length * sizeof(*taps));
+    return length;
+}
+
+static int test_cic3_impulse_and_dc(unsigned rate)
+{
+    int64_t taps[3 * 8];
+    const size_t length = cic3_reference_taps(rate, taps);
+    int64_t sum = 0;
+    for (size_t n = 0; n < length; ++n) sum += taps[n];
+    CHECK(sum == (int64_t)rate * rate * rate);
+    CHECK(taps[0] == 1 && taps[length - 1] == 1);
+
+    /* An impulse at input phase p yields full-rate taps R-1-p, 2R-1-p, ... */
+    for (unsigned p = 0; p < rate; ++p)
+    {
+        struct cic3_decimator cic;
+        cic3_reset(&cic, rate);
+        size_t outputs = 0;
+        for (size_t n = 0; n < 4 * rate + length; ++n)
+        {
+            float i, q;
+            const int x = n == p ? 1 : 0;
+            if (!cic3_decimate(&cic, x, -x, &i, &q)) continue;
+            const size_t at = (outputs + 1) * rate - 1;
+            const int64_t expected = at >= p && at - p < length ? taps[at - p] : 0;
+            CHECK(i == (float)expected * cic.scale);
+            CHECK(q == -(float)expected * cic.scale);
+            ++outputs;
+        }
+        CHECK(outputs == (4 * rate + length) / rate);
+    }
+
+    /* Unity DC gain after normalization, for the full centered input range. */
+    for (int level = -127; level <= 127; level += 127)
+    {
+        struct cic3_decimator cic;
+        cic3_reset(&cic, rate);
+        float i = 0, q = 0;
+        for (size_t n = 0; n < 8 * rate; ++n) cic3_decimate(&cic, level, level / 2, &i, &q);
+        CHECK(fabsf(i - (float)level) <= 1e-5f * 127);
+        CHECK(fabsf(q - (float)(level / 2)) <= 1e-5f * 127);
+    }
+    return EXIT_SUCCESS;
+}
+
+/* Wrapped unsigned integrators must match the exact FIR across 2048-sample
+ * input blocks, whose length is not a multiple of every rate.
+ */
+static int test_cic3_wraparound_and_blocks(unsigned rate)
+{
+    enum { BLOCK = 2048, BLOCKS = 300 };
+    int64_t taps[3 * 8];
+    const size_t length = cic3_reference_taps(rate, taps);
+    static int history[2][BLOCK * BLOCKS];
+    struct cic3_decimator cic;
+    cic3_reset(&cic, rate);
+    uint32_t random = 7;
+    size_t n = 0, outputs = 0;
+    int wrapped = 0;
+    for (size_t block = 0; block < BLOCKS; ++block)
+    {
+        for (size_t k = 0; k < BLOCK; ++k, ++n)
+        {
+            random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+            int i, q;
+            switch ((n / 4096) % 4)
+            {
+                case 0: i = 127; q = -127; break;
+                case 1: i = center_sample(random >> 24); q = center_sample((random >> 16) & 255u); break;
+                case 2: i = -127; q = 127; break;
+                default: i = (n & 1) ? 127 : -127; q = center_sample(random >> 24); break;
+            }
+            history[0][n] = i;
+            history[1][n] = q;
+            float i_out, q_out;
+            if (!cic3_decimate(&cic, i, q, &i_out, &q_out)) continue;
+            CHECK((n + 1) % rate == 0);
+            int64_t expected[2] = {0, 0};
+            for (size_t t = 0; t < length && t <= n; ++t)
+                for (size_t c = 0; c < 2; ++c) expected[c] += taps[t] * history[c][n - t];
+            CHECK(i_out == (float)expected[0] * cic.scale);
+            CHECK(q_out == (float)expected[1] * cic.scale);
+            ++outputs;
+        }
+        if (cic.integrator[0][2] < cic.integrator[0][1]) wrapped = 1;
+    }
+    CHECK(outputs == (size_t)BLOCK * BLOCKS / rate);
+    CHECK(wrapped);
+    return EXIT_SUCCESS;
+}
+
+/* Complex tones: |H(f)| = |sin(pi f R / fs) / (R sin(pi f / fs))|^3. */
+static int test_cic3_magnitude(unsigned rate, const double *table_db)
+{
+    const double fs = 400e3 * rate;
+    const double frequencies[] = {100e3, 300e3, 500e3};
+    for (size_t t = 0; t < 3; ++t)
+    {
+        const double f = frequencies[t];
+        const double ratio = sin(M_PI * f * rate / fs) / (rate * sin(M_PI * f / fs));
+        const double expected_db = 20 * log10(fabs(ratio * ratio * ratio));
+        struct cic3_decimator cic;
+        cic3_reset(&cic, rate);
+        const double amplitude = 1 << 20;
+        float i = 0, q = 0;
+        for (size_t n = 0; n < 64 * rate; ++n)
+            cic3_decimate(&cic, (int)lrint(amplitude * cos(2 * M_PI * f * n / fs)),
+                          (int)lrint(amplitude * sin(2 * M_PI * f * n / fs)), &i, &q);
+        const double measured_db = 20 * log10(fmax(hypot(i, q), 1e-9) / amplitude);
+        CHECK(fabs(measured_db - expected_db) <= 0.1);
+        if (table_db) CHECK(fabs(measured_db - table_db[t]) <= 0.5);
+        printf("PASS CIC R=%u at %.0f kHz: %.2f dB (analytic %.2f dB)\n",
+               rate, f / 1e3, measured_db, expected_db);
+    }
+    return EXIT_SUCCESS;
+}
+
+static int test_cic3(void)
+{
+    for (unsigned u = 0; u < 256; ++u)
+        CHECK(center_sample((uint8_t)u) == (int)((float)u - 127.5f));
+    /* #27 table for R = 4 (droop, near and far alias edges). */
+    const double table_r4[] = {-2.6, -30, -40};
+    for (unsigned rate = C1_FAST_MIN_DECIMATION_RATE; rate <= C1_FAST_MAX_DECIMATION_RATE; ++rate)
+    {
+        CHECK(test_cic3_impulse_and_dc(rate) == EXIT_SUCCESS);
+        CHECK(test_cic3_wraparound_and_blocks(rate) == EXIT_SUCCESS);
+        if (rate == 3 || rate == 4 || rate == 6)
+            CHECK(test_cic3_magnitude(rate, rate == 4 ? table_r4 : NULL) == EXIT_SUCCESS);
+    }
+    puts("PASS CIC impulse, DC gain, wrap-around and block phase for R=3..8");
+    return EXIT_SUCCESS;
+}
+
 /* Keep the original idle behavior as an independent transition reference.
  * Compare every byte after every bit, including storage cleared by real resets.
  */
@@ -405,7 +556,7 @@ int main(void)
     if (test_crc() || test_manchester() || test_filters() ||
         test_fixed_moving_average(8, moving_average_t1_c1) ||
         test_fixed_moving_average(16, moving_average_s1) ||
-        test_symmetric_filters() || test_idle_decoders()) return EXIT_FAILURE;
+        test_symmetric_filters() || test_cic3() || test_idle_decoders()) return EXIT_FAILURE;
     puts("PASS CRC, Manchester, moving average, and FIR checks");
     return EXIT_SUCCESS;
 }
