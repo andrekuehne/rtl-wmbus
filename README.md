@@ -176,6 +176,19 @@ Matching includes the source statement and occurrence count, so shifting line
 numbers does not mask new findings. No warning categories are suppressed;
 review any baseline edits explicitly. Raw logs are kept in `build/quality/`.
 
+GitHub Actions runs these gates on PRs into `dev` and on integration pushes:
+GCC/Clang release/debug capture and helper tests, lint, ASan/UBSan with leak
+detection, informational gcov reports, and an ARM cross-compile compatibility
+check. The primary runtime target is AMD64; ARM is checked for build compatibility.
+CI needs only the checked-in fixtures. Raw replay results, diagnostics, and
+coverage reports are retained as artifacts for 14 days. Action versions are
+pinned to commit hashes and workflows use read-only repository permissions.
+
+The fork's `dev` branch should require these checks and an up-to-date PR before
+merging, including for administrators, with force pushes and deletion disabled.
+Repository branch settings enforce this; the YAML alone does not. Coverage has
+no percentage threshold, and shared-runner timing is not a performance gate.
+
   License
   -------
 
