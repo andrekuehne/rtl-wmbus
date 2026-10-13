@@ -168,14 +168,11 @@ static inline float moving_average_t1_c1(float sample, size_t i_or_q)
     static int i_hist[COEFFS];
     static int q_hist[COEFFS];
 
-    static MAVGI_FILTER filter[2] =                                         // i/q
-    {
-        {.length = COEFFS, .hist = i_hist}, //  0
-        {.length = COEFFS, .hist = q_hist}  //  1
-    };
-#undef COEFFS
+    static MAVGI_FIXED_FILTER filter[2]; // i/q
 
-    return mavgi(sample, &filter[i_or_q]);
+    return mavgi_power_of_two(sample, i_or_q ? q_hist : i_hist,
+                             &filter[i_or_q], COEFFS);
+#undef COEFFS
 }
 
 static inline float moving_average_s1(float sample, size_t i_or_q)
@@ -184,14 +181,11 @@ static inline float moving_average_s1(float sample, size_t i_or_q)
     static int i_hist[COEFFS];
     static int q_hist[COEFFS];
 
-    static MAVGI_FILTER filter[2] =                                         // i/q
-    {
-        {.length = COEFFS, .hist = i_hist}, //  0
-        {.length = COEFFS, .hist = q_hist}  //  1
-    };
-#undef COEFFS
+    static MAVGI_FIXED_FILTER filter[2]; // i/q
 
-    return mavgi(sample, &filter[i_or_q]);
+    return mavgi_power_of_two(sample, i_or_q ? q_hist : i_hist,
+                             &filter[i_or_q], COEFFS);
+#undef COEFFS
 }
 
 static inline float lp_fir_butter_1600kHz_160kHz_200kHz_t1_c1(float sample, size_t i_or_q)

@@ -68,6 +68,59 @@ static int test_filters(void)
     return EXIT_SUCCESS;
 }
 
+/* Preserve the original evaluator as the state and bit-exact output reference. */
+static float reference_mavgi(int sample, MAVGI_FILTER *filter)
+{
+    filter->sum = filter->sum - filter->hist[filter->i] + sample;
+    filter->hist[filter->i++] = sample;
+    if (filter->i >= filter->length) filter->i = 0;
+    return (float)filter->sum / filter->length;
+}
+
+static int test_fixed_moving_average(size_t length,
+                                    float (*fixed_filter)(float, size_t))
+{
+    int reference_history[2][16] = {{0}};
+    int candidate_history[2][16] = {{0}};
+    MAVGI_FILTER reference[2] = {
+        {.length = length, .hist = reference_history[0]},
+        {.length = length, .hist = reference_history[1]}
+    };
+    MAVGI_FIXED_FILTER candidate[2] = {{0}};
+    uint32_t random = 1;
+    for (size_t i = 0; i < 32768; ++i)
+    {
+        random = random * 1664525u + 1013904223u;
+        const size_t channel = random >> 31;
+        float input;
+        switch ((i / 128) % 7)
+        {
+            case 0: input = i == 0 ? 127.5f : 0.f; break;
+            case 1: input = 127.5f; break;
+            case 2: input = -127.5f; break;
+            case 3: input = channel ? -180.99f : 180.99f; break;
+            case 4: input = ((int)((random >> 16) % 11585) - 5792) / 32.f; break;
+            case 5: input = channel ? -0.9999f : 0.9999f; break;
+            default: input = channel ? -1048576.75f : 1048576.75f; break;
+        }
+        const float expected = reference_mavgi((int)input, &reference[channel]);
+        const float actual = length == 8
+            ? mavgi_power_of_two((int)input, candidate_history[channel], &candidate[channel], 8)
+            : mavgi_power_of_two((int)input, candidate_history[channel], &candidate[channel], 16);
+        const float fixed = fixed_filter(input, channel);
+        CHECK(memcmp(&actual, &expected, sizeof(float)) == 0);
+        CHECK(memcmp(&fixed, &expected, sizeof(float)) == 0);
+        for (size_t q = 0; q < 2; ++q)
+        {
+            CHECK(candidate[q].sum == reference[q].sum);
+            CHECK(candidate[q].i == reference[q].i);
+            CHECK(memcmp(candidate_history[q], reference_history[q],
+                         length * sizeof(int)) == 0);
+        }
+    }
+    return EXIT_SUCCESS;
+}
+
 /* Original full tap sets also check that the fixed wrappers keep their taps. */
 static int test_symmetric_filter(size_t length, float *coefficients,
                                  float (*fixed_filter)(float))
@@ -151,7 +204,10 @@ static int test_symmetric_filters(void)
 
 int main(void)
 {
-    if (test_crc() || test_manchester() || test_filters() || test_symmetric_filters()) return EXIT_FAILURE;
+    if (test_crc() || test_manchester() || test_filters() ||
+        test_fixed_moving_average(8, moving_average_t1_c1) ||
+        test_fixed_moving_average(16, moving_average_s1) ||
+        test_symmetric_filters()) return EXIT_FAILURE;
     puts("PASS CRC, Manchester, moving average, and FIR checks");
     return EXIT_SUCCESS;
 }
