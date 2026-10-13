@@ -41,7 +41,7 @@ typedef struct
     const float *const b; // 3 coeff
     const float *const a; // 3 coeff, first of these is assumed to be 1
 
-    float *hist; // 3 taps
+    float *hist; // 2 delays per section
 } IIRF_FILTER;
 
 float iirf(float sample, IIRF_FILTER *filter);
@@ -50,6 +50,7 @@ float iirf(float sample, IIRF_FILTER *filter)
 {
     float *hist;
     const float *a, *b;
+    float w;
     size_t i;
 
     // sample will be "y"
@@ -58,17 +59,17 @@ float iirf(float sample, IIRF_FILTER *filter)
     {
         a = filter->a + 3 * i;
         b = filter->b + 3 * i;
-        hist = filter->hist + 3 * i;
+        hist = filter->hist + 2 * i;
 
 #if 0
-        hist[0] = -sample;
-        hist[0] = -(a[0]*hist[0] + a[1]*hist[1] + a[2]*hist[2]);
+        w = -sample;
+        w = -(a[0]*w + a[1]*hist[0] + a[2]*hist[1]);
 #else
-        hist[0] = sample - (a[1]*hist[1] + a[2]*hist[2]);
+        w = sample - (a[1]*hist[0] + a[2]*hist[1]);
 #endif
-        sample = b[0]*hist[0]  + b[1]*hist[1] + b[2]*hist[2];
-        hist[2] = hist[1];
+        sample = b[0]*w  + b[1]*hist[0] + b[2]*hist[1];
         hist[1] = hist[0];
+        hist[0] = w;
     }
 
     sample *= filter->gain;

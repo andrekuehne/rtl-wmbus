@@ -333,7 +333,7 @@ static inline float bp_iir_cheb1_800kHz_90kHz_98kHz_102kHz_110kHz(float sample)
 #define SECTIONS 3
     static const float b[3*SECTIONS] = {1, 1.999994649, 0.9999946492, 1, -1.99999482, 0.9999948196, 1, 1.703868036e-07, -1.000010531, };
     static const float a[3*SECTIONS] = {1, -1.387139203, 0.9921518712, 1, -1.403492665, 0.9845934971, 1, -1.430055639, 0.9923856172, };
-    static float hist[3*SECTIONS] = {};
+    static float hist[2*SECTIONS] = {};
 
     static IIRF_FILTER filter = {.sections = SECTIONS, .b = b, .a = a, .gain = GAIN, .hist = hist};
 #undef SECTIONS
@@ -348,7 +348,7 @@ static inline float bp_iir_cheb1_800kHz_22kHz_30kHz_34kHz_42kHz(float sample)
 #define SECTIONS 3
     static const float b[3*SECTIONS] = {1, 1.999994187, 0.9999941867, 1, -1.999994026,0.9999940262, 1, -1.605750097e-07, -1.000011787, };
     static const float a[3*SECTIONS] = {1, -1.92151475, 0.9918135499, 1, -1.922481015,0.984593497, 1, -1.937432099, 0.9927241336, };
-    static float hist[3*SECTIONS] = {};
+    static float hist[2*SECTIONS] = {};
 
     static IIRF_FILTER filter = {.sections = SECTIONS, .b = b, .a = a, .gain = GAIN, .hist = hist};
 

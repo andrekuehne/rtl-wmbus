@@ -202,6 +202,91 @@ static int test_symmetric_filters(void)
     return EXIT_SUCCESS;
 }
 
+/* Preserve the original three-slot biquad evaluator as the bit-exact reference. */
+static float reference_iirf(float sample, IIRF_FILTER *filter)
+{
+    for (size_t i = 0; i < filter->sections; i++)
+    {
+        const float *a = filter->a + 3 * i;
+        const float *b = filter->b + 3 * i;
+        float *hist = filter->hist + 3 * i;
+
+        hist[0] = sample - (a[1]*hist[1] + a[2]*hist[2]);
+        sample = b[0]*hist[0]  + b[1]*hist[1] + b[2]*hist[2];
+        hist[2] = hist[1];
+        hist[1] = hist[0];
+    }
+    return sample * filter->gain;
+}
+
+static int same_float(float x, float y)
+{
+    return memcmp(&x, &y, sizeof(x)) == 0;
+}
+
+/* Fresh production wrappers must match from startup through each pattern,
+ * including long zero tails, and keep the same two delays per section.
+ */
+static int test_iir_filter(const float *b, const float *a,
+                           float (*fixed_filter)(float))
+{
+    float reference_history[9] = {0};
+    float history[6] = {0};
+    IIRF_FILTER reference = {.sections = 3, .gain = 1.874981046e-06,
+                             .b = b, .a = a, .hist = reference_history};
+    IIRF_FILTER filter = {.sections = 3, .gain = 1.874981046e-06,
+                          .b = b, .a = a, .hist = history};
+    uint32_t random = 1;
+    size_t samples = 0;
+
+    for (size_t pattern = 0; pattern < 8; ++pattern)
+    {
+        for (size_t n = 0; n < 65536; ++n)
+        {
+            float input = 0;
+            random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+            const float phase = ((float)(random >> 8) / 8388608.f - 1.f) * (float)M_PI;
+            /* Zero tails after each pattern exercise the free decay. */
+            if (n < 32768)
+            {
+                switch (pattern)
+                {
+                    case 0: input = n == 0 ? 1.f : 0.f; break;
+                    case 1: input = 1.f; break;
+                    case 2: input = phase * phase; break;
+                    case 3: input = n & 1 ? 9.869604f : 0.f; break;
+                    case 4: input = (phase * phase) * 1e-12f; break;
+                    case 5: input = (phase * phase) * 1e6f; break;
+                    case 6: input = (n / 8) & 1 ? 0.3f * 0.3f : 0.f; break;
+                    case 7: input = (n / 20) & 1 ? 0.07f * 0.07f : 0.f; break;
+                }
+            }
+            const float expected = reference_iirf(input, &reference);
+            CHECK(same_float(iirf(input, &filter), expected));
+            CHECK(same_float(fixed_filter(input), expected));
+            for (size_t i = 0; i < 3; ++i)
+            {
+                CHECK(same_float(history[2 * i], reference_history[3 * i + 1]));
+                CHECK(same_float(history[2 * i + 1], reference_history[3 * i + 2]));
+            }
+            ++samples;
+        }
+    }
+    printf("PASS IIR: %zu bit-exact samples and states\n", samples);
+    return EXIT_SUCCESS;
+}
+
+static int test_iir_filters(void)
+{
+    static const float t1_c1_b[] = {1, 1.999994649, 0.9999946492, 1, -1.99999482, 0.9999948196, 1, 1.703868036e-07, -1.000010531, };
+    static const float t1_c1_a[] = {1, -1.387139203, 0.9921518712, 1, -1.403492665, 0.9845934971, 1, -1.430055639, 0.9923856172, };
+    static const float s1_b[] = {1, 1.999994187, 0.9999941867, 1, -1.999994026,0.9999940262, 1, -1.605750097e-07, -1.000011787, };
+    static const float s1_a[] = {1, -1.92151475, 0.9918135499, 1, -1.922481015,0.984593497, 1, -1.937432099, 0.9927241336, };
+    CHECK(test_iir_filter(t1_c1_b, t1_c1_a, bp_iir_cheb1_800kHz_90kHz_98kHz_102kHz_110kHz) == EXIT_SUCCESS);
+    CHECK(test_iir_filter(s1_b, s1_a, bp_iir_cheb1_800kHz_22kHz_30kHz_34kHz_42kHz) == EXIT_SUCCESS);
+    return EXIT_SUCCESS;
+}
+
 /* Keep the original idle behavior as an independent transition reference.
  * Compare every byte after every bit, including storage cleared by real resets.
  */
@@ -405,7 +490,8 @@ int main(void)
     if (test_crc() || test_manchester() || test_filters() ||
         test_fixed_moving_average(8, moving_average_t1_c1) ||
         test_fixed_moving_average(16, moving_average_s1) ||
-        test_symmetric_filters() || test_idle_decoders()) return EXIT_FAILURE;
-    puts("PASS CRC, Manchester, moving average, and FIR checks");
+        test_symmetric_filters() || test_iir_filters() ||
+        test_idle_decoders()) return EXIT_FAILURE;
+    puts("PASS CRC, Manchester, moving average, FIR, and IIR checks");
     return EXIT_SUCCESS;
 }
