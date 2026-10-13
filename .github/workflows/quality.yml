@@ -1,0 +1,124 @@
+name: Quality gates
+
+on:
+  pull_request:
+    branches: [dev]
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build-test (${{ matrix.compiler }}, ${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        mode: [release, debug]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and test
+        env:
+          BUILD_COMPILER: ${{ matrix.compiler }}
+          BUILD_MODE: ${{ matrix.mode }}
+        run: |
+          make "$BUILD_MODE" CC="$BUILD_COMPILER"
+          make check CC="$BUILD_COMPILER"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: captures-${{ matrix.compiler }}-${{ matrix.mode }}
+          path: build/test-results/
+          retention-days: 14
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install analyzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cppcheck
+      - name: Check diagnostics and patch whitespace
+        env:
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          make lint
+          make check-warnings CC=clang
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: diagnostics
+          path: build/quality/
+          retention-days: 14
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and test with ASan and UBSan
+        run: |
+          make release CFLAGS="-Iinclude -std=gnu99 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" LIB="-lm -fsanitize=address,undefined"
+          make check CFLAGS="-Iinclude -std=gnu99 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" LIB="-lm -fsanitize=address,undefined"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: sanitizer-captures
+          path: build/test-results/
+          retention-days: 14
+
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Collect informational coverage
+        run: |
+          make release CFLAGS="-Iinclude -std=gnu99 -O0 -g --coverage -fprofile-abs-path" LIB="-lm --coverage"
+          make check CFLAGS="-Iinclude -std=gnu99 -O0 -g --coverage -fprofile-abs-path" LIB="-lm --coverage"
+          mkdir -p build/coverage
+          cd build/coverage
+          gcov -b -c -l ../rtl_wmbus.gcno ../test_core.gcno > summary.txt
+          cat summary.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage
+          path: build/coverage/
+          retention-days: 14
+
+  arm-compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cross-compile the portable release build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf
+          make release CC=arm-linux-gnueabihf-gcc CFLAGS="-Iinclude -std=gnu99 -Werror"
