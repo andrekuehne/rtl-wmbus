@@ -120,5 +120,5 @@ jobs:
       - name: Cross-compile the portable release build
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf
+          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
           make release CC=arm-linux-gnueabihf-gcc CFLAGS="-Iinclude -std=gnu99 -Werror"
