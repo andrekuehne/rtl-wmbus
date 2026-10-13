@@ -50,10 +50,28 @@ Treat generated code and performance claims as hypotheses requiring verification
 - If a change regresses correctness or has no credible benefit, revise or discard
   it. State limitations honestly; never present unrun checks as passing.
 
+## Branches and upstream PRs
+
+- Keep `master` aligned with upstream. Use `dev` as the integration branch for
+  this fork's agent policy and accumulated, validated optimizations.
+- Start each optimization on a `codex/<topic>` branch from `dev`. Profile, change,
+  validate, and commit it, then integrate the validated commits into `dev` before
+  starting the next optimization. This becomes the next development baseline.
+- Prepare one upstream PR per logical optimization on a separate
+  `codex/pr-<topic>` branch based on upstream's current default branch. Cherry-pick
+  only the relevant code, tests, and evidence; exclude fork-specific agent policy
+  and unrelated optimizations. Repeat correctness checks and benchmarks against
+  that branch's upstream baseline before submission.
+- Independent optimizations can be submitted as soon as they are ready. If a
+  change depends on an earlier optimization, continue development locally and
+  submit its PR after the prerequisite merges upstream.
+- Keep PRs individually reviewable. Do not submit the accumulated `dev` branch
+  as one large upstream PR.
+
 ## Keep a clean patch stack
 
-- Inspect the working tree first and preserve unrelated user changes. Use
-  `codex/<topic>` branches and never rewrite existing commits without authorization.
+- Inspect the working tree first and preserve unrelated user changes. Never
+  rewrite existing commits without authorization.
 - Commit each validated logical change before starting the next. Every commit
   should build and pass its relevant checks; avoid mixed-purpose or fixup-only
   commits in the final stack. Stack only necessary dependencies.
