@@ -44,6 +44,23 @@ typedef struct
 
 float mavgi(int sample, MAVGI_FILTER *filter);
 
+typedef struct
+{
+    size_t i;
+    int sum;
+} MAVGI_FIXED_FILTER;
+
+/* Length must match the history and be a power of two. */
+static inline float mavgi_power_of_two(int sample, int *hist,
+                                     MAVGI_FIXED_FILTER *filter, size_t length)
+{
+    filter->sum = filter->sum - hist[filter->i] + sample;
+    hist[filter->i] = sample;
+    filter->i = (filter->i + 1) & (length - 1);
+
+    return (float)filter->sum / length;
+}
+
 float mavgi(int sample, MAVGI_FILTER *filter)
 {
     filter->sum = filter->sum - filter->hist[filter->i] + sample;
