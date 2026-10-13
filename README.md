@@ -138,6 +138,32 @@ A new options "-o", which means "remove dc offset", was introduced. The overall 
  * cat samples/rtlsdr_868.950M_1M6_issue49.cu8 | build/rtl_wmbus -o
  * cat samples/rtlsdr_868.625M_2M4_issue48.cu8 | build/rtl_wmbus -d 3 -s -o
 
+  Testing
+  -------
+
+Run `make test` to build release and run the capture regression suite, focused C
+helper tests, and Python comparator tests. To check the debug binary, run
+`make debug` followed by `make check`. Python 3.9 or newer is required; no Python
+packages or SDR hardware are needed. Compiler and linker overrides apply to the
+helper tests too, allowing the same checks to run under sanitizers.
+
+The six capture cases cover successful T1, C1, and S1 decoding. Four reuse
+`samples/`; two small compressed real-signal slices live in `tests/fixtures/`.
+Their manifest records checksums, original capture settings, source links, and
+the frequency shift applied to the historical mixed recording. Expected output
+comes from the frozen `7f34d82` baseline. Only valid wall-clock timestamps are
+normalized; payloads, RSSI, CRC status, order, duplicates, stderr, and exit status
+must match. Existing CRC-invalid rows are retained. Do not regenerate expected
+output automatically from a candidate change.
+
+Results are written to `build/test-results/`. Run a selected case with
+`python3 tests/replay_captures.py --binary build/rtl_wmbus --case c1-short`.
+The optional ignored local corpus adds long S1 and mixed-mode checks through
+`python3 captures/tools/replay.py --binary build/rtl_wmbus` when available.
+Replay coverage does not establish unchanged reception sensitivity, and the C1
+slice contains only one unique telegram. CRC unit checks use the published
+[CRC-16/EN-13757 check vector](https://reveng.sourceforge.io/crc-catalogue/all.htm#crc.cat.crc-16-en-13757).
+
   License
   -------
 

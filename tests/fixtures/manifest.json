@@ -1,0 +1,123 @@
+{
+  "baseline_commit": "7f34d82ea85f25e4eb34b4eeb21010caa22b7166",
+  "sample_format": "Unsigned interleaved 8-bit I/Q; two bytes per complex sample.",
+  "cases": [
+    {
+      "name": "s1-short",
+      "input": "tests/fixtures/s1-short.cu8.gz",
+      "gzip": true,
+      "sha256": "cf55ccfd4946ecb450e87e2d5839bbe55b1338d416b11d4e42d15ad4a0e227a8",
+      "sample_rate_hz": 1600000,
+      "center_frequency_hz": 868625000,
+      "options": [
+        "-s"
+      ],
+      "expected": "tests/expected/s1-short.txt",
+      "expected_sha256": "a6d425be53a5688f71e62a2c7994036b2b9d6469b5ecf7f1623f9562267d5f56"
+    },
+    {
+      "name": "c1-short",
+      "input": "tests/fixtures/c1-short.cu8.gz",
+      "gzip": true,
+      "sha256": "5b4ccbb366919bc27781a3e8e1ce25f37865a263cd32e5101b75189d11b0a9a7",
+      "sample_rate_hz": 1600000,
+      "center_frequency_hz": 868625000,
+      "options": [
+        "-s"
+      ],
+      "expected": "tests/expected/c1-short.txt",
+      "expected_sha256": "551772d1a27e8bffd050ef494f207e3be7f05478bcf9b5c2bc1ab5c46da3b8c3"
+    },
+    {
+      "name": "tracked-samples2",
+      "input": "samples/rtlsdr_868.950M_1M6_samples2.cu8",
+      "gzip": false,
+      "sha256": "012e3369149fca9837d083130e07a179a6a77117c29cb24f586b2287bd9783d2",
+      "sample_rate_hz": 1600000,
+      "center_frequency_hz": 868950000,
+      "options": [],
+      "expected": "tests/expected/tracked-samples2.txt",
+      "expected_sha256": "20f01a2fd60839e182015c32ecd4da687d5d9c425fae0a3aab1cfc2c1d5f1636"
+    },
+    {
+      "name": "tracked-issue47",
+      "input": "samples/rtlsdr_868.950M_1M6_issue47.cu8",
+      "gzip": false,
+      "sha256": "f1057d3c409f8d1f90a66ad118f4c0354f5f0b8707e40a4be10b64ea44ff4457",
+      "sample_rate_hz": 1600000,
+      "center_frequency_hz": 868950000,
+      "options": [
+        "-o"
+      ],
+      "expected": "tests/expected/tracked-issue47.txt",
+      "expected_sha256": "1af0c2dff39b6280f07e9dcde01ea015dd516592ff4ab311eb77b1259b8b6d15"
+    },
+    {
+      "name": "tracked-issue49",
+      "input": "samples/rtlsdr_868.950M_1M6_issue49.cu8",
+      "gzip": false,
+      "sha256": "9e903add270ac3df3a25439870b7a2e3886f204f2c18bb113ffe783425acff6b",
+      "sample_rate_hz": 1600000,
+      "center_frequency_hz": 868950000,
+      "options": [
+        "-o"
+      ],
+      "expected": "tests/expected/tracked-issue49.txt",
+      "expected_sha256": "79d28b3cb9b0cb5ccdaf0b2307bb3fe78f230be83dfa66fdec448c43d393d761"
+    },
+    {
+      "name": "tracked-issue48",
+      "input": "samples/rtlsdr_868.625M_2M4_issue48.cu8",
+      "gzip": false,
+      "sha256": "6f31b0270e9b7cb18b5cf5d6394751b487a109e572e9423a1650bb20c7500286",
+      "sample_rate_hz": 2400000,
+      "center_frequency_hz": 868625000,
+      "options": [
+        "-d",
+        "3",
+        "-s",
+        "-o"
+      ],
+      "expected": "tests/expected/tracked-issue48.txt",
+      "expected_sha256": "3f2d315a4bf0479a38158278cf5f0f26c572adc9f514df209f38a8c243167d54"
+    }
+  ],
+  "derived_fixture_provenance": {
+    "s1-short": {
+      "source": "https://github.com/xaelsouth/rtl-wmbus/issues/15#issuecomment-774269095",
+      "original_archive": "samples.tar.xz",
+      "original_archive_sha256": "176e2868d69fb8932f2eca9bb9e1367421ab2c065f692a551916495a683274d0",
+      "original_iq_sha256": "31ac69c57c4777b068d5af5c78db023613a121d1edb9a7b0dac1116fc08440c8",
+      "original_center_frequency_hz": 868700000,
+      "fixture_center_frequency_hz": 868625000,
+      "sample_rate_hz": 1600000,
+      "shift_hz": 75000,
+      "gain": 0.7071067811865475,
+      "transformation": "center I/Q at 127.5, multiply by exp(+j*2*pi*75000*n/1600000) and gain 1/sqrt(2), round to unsigned 8-bit I/Q; no components clipped",
+      "shifted_full_iq_sha256": "e01f69ea543363e4026eb12bb1aeb7d7cf1c65285edd603b43700e7a2b6469ea",
+      "byte_range": {
+        "start_inclusive": 0,
+        "end_exclusive": 1150976
+      },
+      "note": "Unmodified byte slice of the recentered recording, with up to 0.5 s warm-up and 0.1 s trailing data around a CRC-valid packet. Mode-only refers to decoded traffic, not proof of an RF-silent other channel."
+    },
+    "c1-short": {
+      "source": "https://github.com/xaelsouth/rtl-wmbus/issues/15#issuecomment-774269095",
+      "original_archive": "samples.tar.xz",
+      "original_archive_sha256": "176e2868d69fb8932f2eca9bb9e1367421ab2c065f692a551916495a683274d0",
+      "original_iq_sha256": "31ac69c57c4777b068d5af5c78db023613a121d1edb9a7b0dac1116fc08440c8",
+      "original_center_frequency_hz": 868700000,
+      "fixture_center_frequency_hz": 868625000,
+      "sample_rate_hz": 1600000,
+      "shift_hz": 75000,
+      "gain": 0.7071067811865475,
+      "transformation": "center I/Q at 127.5, multiply by exp(+j*2*pi*75000*n/1600000) and gain 1/sqrt(2), round to unsigned 8-bit I/Q; no components clipped",
+      "shifted_full_iq_sha256": "e01f69ea543363e4026eb12bb1aeb7d7cf1c65285edd603b43700e7a2b6469ea",
+      "byte_range": {
+        "start_inclusive": 204972032,
+        "end_exclusive": 206897152
+      },
+      "note": "Unmodified byte slice of the recentered recording, with up to 0.5 s warm-up and 0.1 s trailing data around a CRC-valid packet. Mode-only refers to decoded traffic, not proof of an RF-silent other channel."
+    }
+  }
+}

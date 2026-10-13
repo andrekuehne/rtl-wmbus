@@ -1,1 +1,4 @@
 /captures/
+/build/
+/gmon.out
+__pycache__/

@@ -9,6 +9,9 @@ CFLAGS+=-Iinclude -std=gnu99
 CFLAGS_WARNINGS?=-Wall -W -Waggregate-return -Wbad-function-cast -Wcast-align -Wcast-qual -Wchar-subscripts -Wcomment -Wno-float-equal -Winline -Wmain -Wmissing-noreturn -Wno-missing-prototypes -Wparentheses -Wpointer-arith -Wredundant-decls -Wreturn-type -Wshadow -Wsign-compare -Wstrict-prototypes -Wswitch -Wunreachable-code -Wno-unused -Wuninitialized
 LIB?=-lm
 SRC=rtl_wmbus.c
+PYTHON?=python3
+
+.PHONY: all release debug pi1 rebuild install clean test check test-unit test-captures test-runner
 
 $(shell $(MKDIR) -p $(OUTDIR))
 
@@ -54,6 +57,22 @@ release:
 
 debug:
 	$(CC) -DDEBUG  -O0 -g3 -ggdb -p -pg $(CFLAGS) $(CFLAGS_WARNINGS) -o $(OUTFILE) $(SRC) $(LIB)
+
+test: release
+	$(MAKE) check
+
+# Check the existing binary so debug and sanitizer builds can use the same tests.
+check: test-unit test-captures test-runner
+
+test-unit:
+	$(CC) -O0 -g $(CFLAGS) $(CFLAGS_WARNINGS) -o "$(OUTDIR)/test_core" tests/test_core.c $(LIB)
+	"$(OUTDIR)/test_core"
+
+test-captures:
+	$(PYTHON) tests/replay_captures.py --binary $(OUTFILE)
+
+test-runner:
+	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
 # Will build on Raspberry Pi 1 only
 pi1:
