@@ -133,7 +133,11 @@ static void s1_idle(unsigned bit, struct s1_packet_decoder_work *decoder)
 {
     if (!(bit & PACKET_PREAMBLE_DETECTED_MASK))
     {
-        reset_s1_packet_decoder(decoder);
+        /* All entries into idle fully reset the decoder. Only dispatch's
+         * state increment and current RSSI need undoing on another idle bit.
+         */
+        decoder->state = &s1_decoder_states[0];
+        decoder->current_rssi = 0;
     }
 }
 

@@ -202,12 +202,210 @@ static int test_symmetric_filters(void)
     return EXIT_SUCCESS;
 }
 
+/* Keep the original idle behavior as an independent transition reference.
+ * Compare every byte after every bit, including storage cleared by real resets.
+ */
+static struct t1_c1_packet_decoder_work idle_t1[2], reference_t1[2];
+static struct s1_packet_decoder_work idle_s1[2], reference_s1[2];
+
+static int decoder_bit(unsigned channel, unsigned bit, unsigned rssi)
+{
+    struct t1_c1_packet_decoder_work *t = &reference_t1[channel];
+    struct s1_packet_decoder_work *s = &reference_s1[channel];
+    if (t->state == t1_c1_decoder_states && !(bit & PACKET_PREAMBLE_DETECTED_MASK))
+        reset_t1_c1_packet_decoder(t);
+    else
+        t1_c1_packet_decoder(bit, rssi, t, "");
+    t1_c1_packet_decoder(bit, rssi, &idle_t1[channel], "");
+    CHECK(memcmp(t, &idle_t1[channel], sizeof(*t)) == 0);
+
+    if (s->state == s1_decoder_states && !(bit & PACKET_PREAMBLE_DETECTED_MASK))
+        reset_s1_packet_decoder(s);
+    else
+        s1_packet_decoder(bit, rssi, s, "");
+    s1_packet_decoder(bit, rssi, &idle_s1[channel], "");
+    CHECK(memcmp(s, &idle_s1[channel], sizeof(*s)) == 0);
+    return EXIT_SUCCESS;
+}
+
+static int decoder_word(unsigned channel, unsigned value, unsigned bits)
+{
+    while (bits--)
+        CHECK(decoder_bit(channel, (value >> bits) & 1u,
+                          PACKET_CAPTURE_THRESHOLD) == EXIT_SUCCESS);
+    return EXIT_SUCCESS;
+}
+
+static int decoder_manchester_byte(unsigned channel, unsigned byte)
+{
+    for (unsigned bit = 8; bit-- > 0;)
+        CHECK(decoder_word(channel, (byte >> bit) & 1u ? 1u : 2u, 2) == EXIT_SUCCESS);
+    return EXIT_SUCCESS;
+}
+
+static unsigned encode_3outof6(unsigned nibble)
+{
+    for (unsigned code = 0; code < 64; ++code)
+        if (LOW_NIBBLE_3OUTOF6[code] == nibble) return code;
+    return 0;
+}
+
+static int decoder_t1_byte(unsigned channel, unsigned byte)
+{
+    CHECK(decoder_word(channel, encode_3outof6(byte >> 4), 6) == EXIT_SUCCESS);
+    CHECK(decoder_word(channel, encode_3outof6(byte & 15u), 6) == EXIT_SUCCESS);
+    return EXIT_SUCCESS;
+}
+
+static int reset_test_decoders(void)
+{
+    for (unsigned channel = 0; channel < 2; ++channel)
+    {
+        /* Poison old payload/timestamp and control state before real entry to
+         * idle: startup, abort and completion must still fully initialize it.
+         */
+        memset(&idle_t1[channel], 0xa5, sizeof(idle_t1[channel]));
+        memset(&idle_s1[channel], 0x5a, sizeof(idle_s1[channel]));
+        reset_t1_c1_packet_decoder(&idle_t1[channel]);
+        reset_s1_packet_decoder(&idle_s1[channel]);
+        reset_t1_c1_packet_decoder(&reference_t1[channel]);
+        reset_s1_packet_decoder(&reference_s1[channel]);
+        CHECK(memcmp(&idle_t1[channel], &reference_t1[channel], sizeof(idle_t1[channel])) == 0);
+        CHECK(memcmp(&idle_s1[channel], &reference_s1[channel], sizeof(idle_s1[channel])) == 0);
+    }
+    return EXIT_SUCCESS;
+}
+
+static void erase_test_timestamp(char *line)
+{
+    /* Only wall-clock field 3 is nondeterministic, as in capture replays. */
+    for (unsigned field = 0; field < 3; ++field)
+    {
+        line = strchr(line, ';');
+        if (!line) return;
+        ++line;
+    }
+    char *end = strchr(line, ';');
+    if (end) memset(line, ' ', (size_t)(end - line));
+}
+
+static int test_idle_decoders(void)
+{
+    FILE *output = tmpfile();
+    CHECK(output != NULL);
+    fflush(stdout);
+    const int saved_stdout = dup(STDOUT_FILENO);
+    CHECK(saved_stdout >= 0);
+    CHECK(dup2(fileno(output), STDOUT_FILENO) >= 0);
+    CHECK(reset_test_decoders() == EXIT_SUCCESS);
+    for (unsigned i = 0; i < 4096; ++i)
+        CHECK(decoder_bit(i & 1u, i & 1u, i % (PACKET_CAPTURE_THRESHOLD + 2)) == EXIT_SUCCESS);
+
+    /* Valid frames, CRC-invalid frames, shortest/longest L-fields and repeated
+     * frames immediately after completion. Both instances interleave bits.
+     */
+    const uint8_t valid[] = {9, 0x44, 0x65, 0x32, 0x41, 0x85, 0x99, 4, 1, 8, 0x33, 0x58};
+    const unsigned lengths[] = {9, 0, 1, 10, 255};
+    for (unsigned mode = 0; mode < 4; ++mode)
+        for (size_t length = 0; length < sizeof(lengths) / sizeof(lengths[0]); ++length)
+        {
+            CHECK(reset_test_decoders() == EXIT_SUCCESS);
+            for (unsigned repeat = 0; repeat < 2; ++repeat)
+            {
+                for (unsigned channel = 0; channel < 2; ++channel)
+                    CHECK(decoder_bit(channel, PACKET_PREAMBLE_DETECTED_MASK,
+                                      PACKET_CAPTURE_THRESHOLD) == EXIT_SUCCESS);
+                if (mode >= 2)
+                    for (unsigned channel = 0; channel < 2; ++channel)
+                    {
+                        CHECK(decoder_word(channel, mode == 2 ? C1_MODE_A : C1_MODE_B, 12) == EXIT_SUCCESS);
+                        CHECK(decoder_word(channel, C1_MODE_AB_TRAILER, 4) == EXIT_SUCCESS);
+                    }
+                const unsigned L = lengths[length];
+                const unsigned bytes = mode == 3 ? (unsigned)get_mode_b_tlg_length(L)
+                                                : FULL_TLG_LENGTH_FROM_L_FIELD[L];
+                for (unsigned i = 0; i < bytes; ++i)
+                    for (unsigned channel = 0; channel < 2; ++channel)
+                    {
+                        unsigned byte = L == 9 && i < sizeof(valid) ? valid[i] : i & 255u;
+                        if (i == 0) byte = L;
+                        if (repeat && i == 2) byte ^= 1u;
+                        CHECK((mode == 0 ? decoder_t1_byte(channel, byte) :
+                               mode == 1 ? decoder_manchester_byte(channel, byte) :
+                                           decoder_word(channel, byte, 8)) == EXIT_SUCCESS);
+                    }
+            }
+        }
+
+    CHECK(reset_test_decoders() == EXIT_SUCCESS);
+    for (unsigned channel = 0; channel < 2; ++channel)
+    {
+        CHECK(decoder_bit(channel, PACKET_PREAMBLE_DETECTED_MASK,
+                          PACKET_CAPTURE_THRESHOLD) == EXIT_SUCCESS);
+        CHECK(decoder_word(channel, 0, 12) == EXIT_SUCCESS);
+        CHECK(!in_rx_t1_c1_packet_decoder(&idle_t1[channel]));
+        CHECK(!in_rx_s1_packet_decoder(&idle_s1[channel]));
+        CHECK(decoder_bit(channel, PACKET_PREAMBLE_DETECTED_MASK,
+                          PACKET_CAPTURE_THRESHOLD) == EXIT_SUCCESS);
+        CHECK(decoder_word(channel, C1_MODE_A, 12) == EXIT_SUCCESS);
+        CHECK(decoder_word(channel, 0, 4) == EXIT_SUCCESS);
+        CHECK(!in_rx_t1_c1_packet_decoder(&idle_t1[channel]));
+    }
+
+    /* Abort at every position of a truncated header/data sequence, including
+     * below/at RSSI threshold, invalid Manchester, 3-of-6 and C1 trailer.
+     */
+    for (unsigned cut = 0; cut < 96; ++cut)
+    {
+        CHECK(reset_test_decoders() == EXIT_SUCCESS);
+        for (unsigned channel = 0; channel < 2; ++channel)
+            CHECK(decoder_bit(channel, PACKET_PREAMBLE_DETECTED_MASK,
+                              PACKET_CAPTURE_THRESHOLD) == EXIT_SUCCESS);
+        for (unsigned i = 0; i < cut; ++i)
+            CHECK(decoder_bit(i & 1u, i % 3 == 0, PACKET_CAPTURE_THRESHOLD) == EXIT_SUCCESS);
+        for (unsigned channel = 0; channel < 2; ++channel)
+        {
+            CHECK(decoder_bit(channel, PACKET_PREAMBLE_DETECTED_MASK,
+                              PACKET_CAPTURE_THRESHOLD - 1) == EXIT_SUCCESS);
+            CHECK(decoder_bit(channel, PACKET_PREAMBLE_DETECTED_MASK,
+                              PACKET_CAPTURE_THRESHOLD) == EXIT_SUCCESS);
+        }
+    }
+    uint32_t random = 9;
+    for (unsigned i = 0; i < 65536; ++i)
+    {
+        random = random * 1664525u + 1013904223u;
+        unsigned bit = random >> 31;
+        if ((random & 127u) == 0) bit |= PACKET_PREAMBLE_DETECTED_MASK;
+        CHECK(decoder_bit((random >> 8) & 1u, bit,
+                          (random >> 16) % (PACKET_CAPTURE_THRESHOLD + 2)) == EXIT_SUCCESS);
+    }
+    fflush(stdout);
+    CHECK(dup2(saved_stdout, STDOUT_FILENO) >= 0);
+    close(saved_stdout);
+    rewind(output);
+    char reference[2048], candidate[2048];
+    unsigned rows = 0;
+    while (fgets(reference, sizeof(reference), output))
+    {
+        CHECK(fgets(candidate, sizeof(candidate), output) != NULL);
+        erase_test_timestamp(reference);
+        erase_test_timestamp(candidate);
+        CHECK(strcmp(reference, candidate) == 0);
+        ++rows;
+    }
+    CHECK(rows >= 40);
+    fclose(output);
+    printf("PASS idle decoder transitions and %u complete output pairs\n", rows);
+    return EXIT_SUCCESS;
+}
+
 int main(void)
 {
     if (test_crc() || test_manchester() || test_filters() ||
         test_fixed_moving_average(8, moving_average_t1_c1) ||
         test_fixed_moving_average(16, moving_average_s1) ||
-        test_symmetric_filters()) return EXIT_FAILURE;
+        test_symmetric_filters() || test_idle_decoders()) return EXIT_FAILURE;
     puts("PASS CRC, Manchester, moving average, and FIR checks");
     return EXIT_SUCCESS;
 }
