@@ -364,12 +364,12 @@ static inline float lp_fir_butter_800kHz_100kHz_160kHz(float sample)
 {
 #define COEFFS 11
     static float b[(COEFFS+1)/2] = {-0.00456638213, -0.002571450348, 0.02689425925, 0.1141330398, 0.2264456422, 0.2793297826, };
-    static float hist[COEFFS];
+    static float hist[2 * COEFFS];
 
     static FIRF_FILTER filter = {.length = COEFFS, .b = b, .hist = hist};
 #undef COEFFS
 
-    return firf_symmetric(sample, &filter);
+    return firf_symmetric_mirrored(sample, &filter);
 }
 
 static inline float lp_fir_butter_800kHz_32kHz_36kHz(float sample)
@@ -377,12 +377,12 @@ static inline float lp_fir_butter_800kHz_32kHz_36kHz(float sample)
 #define COEFFS 46
     static float b[(COEFFS+1)/2] = {-0.000649081282, -0.0009491938209, -0.001361601657, -0.001910785234, -0.002570133495, -0.003251218426, -0.003801634695, -0.004012672882, -0.003636803575, -0.002413585945, -0.0001013597693, 0.003488892085, 0.008461671287, 0.01481127545, 0.02240598045, 0.03098477999, 0.0401679839, 0.04948137286, 0.05839197924, 0.06635211627, 0.07284719662, 0.07744230649, 0.07982251613, };
 
-    static float hist[COEFFS];
+    static float hist[2 * COEFFS];
 
     static FIRF_FILTER filter = {.length = COEFFS, .b = b, .hist = hist};
 #undef COEFFS
 
-    return firf_symmetric(sample, &filter);
+    return firf_symmetric_mirrored(sample, &filter);
 }
 
 /* https://liquidsdr.org/blog/lms-equalizer/ */

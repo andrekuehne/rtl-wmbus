@@ -108,6 +108,31 @@ static inline float firf_symmetric(float sample, FIRF_FILTER *filter)
     return result;
 }
 
+/* Fixed symmetric taps; hist holds 2 * length floats initialized as identical
+ * halves of the history ring.
+ * Mirroring keeps both sides of each pair contiguous across ring wrap while
+ * preserving firf_symmetric's tap and accumulation order.
+ */
+static inline float firf_symmetric_mirrored(float sample, FIRF_FILTER *filter)
+{
+    const size_t length = filter->length;
+    const size_t pairs = length / 2;
+    const size_t left = filter->i + length;
+    const size_t right = filter->i + 1;
+    float result = 0;
+
+    filter->hist[filter->i] = sample;
+    filter->hist[left] = sample;
+    filter->i = right == length ? 0 : right;
+
+    for (size_t tap = 0; tap < pairs; ++tap)
+        result += filter->b[tap] *
+                  (filter->hist[left - tap] + filter->hist[right + tap]);
+    if (length & 1) result += filter->b[pairs] * filter->hist[left - pairs];
+
+    return result;
+}
+
 void firf_lms(float mu_e, FIRF_FILTER *filter)
 {
     float *b = &filter->b[filter->length-1];
