@@ -127,18 +127,24 @@ static int test_symmetric_filter(size_t length, float *coefficients,
 {
     float reference_history[46] = {0};
     float folded_history[46] = {0};
+    float mirrored_storage[2 * length + 2];
     float folded_coefficients[(length + 1) / 2];
     FIRF_FILTER reference = {.length = length, .b = coefficients,
                             .hist = reference_history};
     FIRF_FILTER folded = {.length = length, .b = folded_coefficients,
                          .hist = folded_history};
+    FIRF_FILTER mirrored = {.length = length, .b = folded_coefficients,
+                           .hist = mirrored_storage + 1};
     uint32_t random = 1;
     double max_error_ratio = 0;
     double max_sign_magnitude = 0;
     size_t sign_differences = 0;
 
     memcpy(folded_coefficients, coefficients, sizeof(folded_coefficients));
-    for (size_t pattern = 0; pattern < 8; ++pattern)
+    memset(mirrored_storage, 0, sizeof(mirrored_storage));
+    mirrored_storage[0] = 12345.25f;
+    mirrored_storage[2 * length + 1] = -9876.5f;
+    for (size_t pattern = 0; pattern < 10; ++pattern)
     {
         for (size_t n = 0; n < 256 * length; ++n)
         {
@@ -160,10 +166,13 @@ static int test_symmetric_filter(size_t length, float *coefficients,
                     case 5: input = noise * 32768.f; break;
                     case 6: input = noise * 1e-10f; break;
                     case 7: input = n & 1 ? 1.f : -0.99999988f; break;
+                    case 8: input = n & 1 ? 0.f : -0.f; break;
+                    case 9: input = noise * 0x1p-140f; break;
                 }
             }
             const float expected = firf(input, &reference);
             const float actual = firf_symmetric(input, &folded);
+            const float contiguous = firf_symmetric_mirrored(input, &mirrored);
             const float fixed = fixed_filter(input);
             double magnitude = 0;
             for (size_t k = 0; k < length; ++k)
@@ -181,15 +190,64 @@ static int test_symmetric_filter(size_t length, float *coefficients,
                     max_sign_magnitude = fabs((double)expected);
             }
             CHECK(isfinite(actual) && isfinite(fixed));
+            CHECK(memcmp(&contiguous, &actual, sizeof(float)) == 0);
+            CHECK(memcmp(&fixed, &actual, sizeof(float)) == 0);
             CHECK(error <= bound);
             CHECK(fabs((double)fixed - expected) <= bound);
             CHECK(folded.i == reference.i);
+            CHECK(mirrored.i == folded.i);
             CHECK(memcmp(reference_history, folded_history,
                          length * sizeof(float)) == 0);
+            CHECK(memcmp(folded_history, mirrored.hist,
+                         length * sizeof(float)) == 0);
+            CHECK(memcmp(mirrored.hist, mirrored.hist + length,
+                         length * sizeof(float)) == 0);
+            CHECK(mirrored_storage[0] == 12345.25f);
+            CHECK(mirrored_storage[2 * length + 1] == -9876.5f);
         }
     }
     printf("PASS symmetric FIR N=%zu: max error/bound %.6f, %zu sign differences (reference magnitude <= %.9g)\n",
            length, max_error_ratio, sign_differences, max_sign_magnitude);
+    return EXIT_SUCCESS;
+}
+
+static int test_mirrored_filter_alignment(size_t length, float *coefficients)
+{
+    float reference_history[length];
+    float storage[2 * length + 2];
+    FIRF_FILTER reference = {.length = length, .b = coefficients,
+                            .hist = reference_history};
+    FIRF_FILTER mirrored = {.length = length, .b = coefficients,
+                           .hist = storage + 1};
+    uint32_t random = 1;
+
+    for (size_t start = 0; start < length; ++start)
+    {
+        reference.i = mirrored.i = start;
+        storage[0] = 12345.25f;
+        storage[2 * length + 1] = -9876.5f;
+        for (size_t k = 0; k < length; ++k)
+        {
+            random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+            reference_history[k] = (float)(random >> 8) / 8388608.f - 1.f;
+            mirrored.hist[k] = mirrored.hist[k + length] = reference_history[k];
+        }
+        for (size_t n = 0; n < 8 * length; ++n)
+        {
+            random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+            const float input = (float)(random >> 8) / 8388608.f - 1.f;
+            const float expected = firf_symmetric(input, &reference);
+            const float actual = firf_symmetric_mirrored(input, &mirrored);
+            CHECK(memcmp(&actual, &expected, sizeof(float)) == 0);
+            CHECK(mirrored.i == reference.i);
+            CHECK(memcmp(reference_history, mirrored.hist,
+                         sizeof(reference_history)) == 0);
+            CHECK(memcmp(mirrored.hist, mirrored.hist + length,
+                         sizeof(reference_history)) == 0);
+            CHECK(storage[0] == 12345.25f);
+            CHECK(storage[2 * length + 1] == -9876.5f);
+        }
+    }
     return EXIT_SUCCESS;
 }
 
@@ -199,6 +257,8 @@ static int test_symmetric_filters(void)
     float s1[] = {-0.000649081282, -0.0009491938209, -0.001361601657, -0.001910785234, -0.002570133495, -0.003251218426, -0.003801634695, -0.004012672882, -0.003636803575, -0.002413585945, -0.0001013597693, 0.003488892085, 0.008461671287, 0.01481127545, 0.02240598045, 0.03098477999, 0.0401679839, 0.04948137286, 0.05839197924, 0.06635211627, 0.07284719662, 0.07744230649, 0.07982251613, 0.07982251613, 0.07744230649, 0.07284719662, 0.06635211627, 0.05839197924, 0.04948137286, 0.0401679839, 0.03098477999, 0.02240598045, 0.01481127545, 0.008461671287, 0.003488892085, -0.0001013597693, -0.002413585945, -0.003636803575, -0.004012672882, -0.003801634695, -0.003251218426, -0.002570133495, -0.001910785234, -0.001361601657, -0.0009491938209, -0.000649081282, };
     CHECK(test_symmetric_filter(11, t1_c1, lp_fir_butter_800kHz_100kHz_160kHz) == EXIT_SUCCESS);
     CHECK(test_symmetric_filter(46, s1, lp_fir_butter_800kHz_32kHz_36kHz) == EXIT_SUCCESS);
+    CHECK(test_mirrored_filter_alignment(11, t1_c1) == EXIT_SUCCESS);
+    CHECK(test_mirrored_filter_alignment(46, s1) == EXIT_SUCCESS);
     return EXIT_SUCCESS;
 }
 
