@@ -11,7 +11,9 @@ from replay_captures import checked_bytes, normalize
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("RTL_WMBUS_TEST_BINARY", ROOT / "build/rtl_wmbus")).resolve()
-CASES = json.loads((ROOT / "tests/fixtures/manifest.json").read_text())["cases"]
+# Fast-path (-c) cases have their own checks in test_c1_fast.py.
+CASES = [case for case in json.loads((ROOT / "tests/fixtures/manifest.json").read_text())["cases"]
+         if "fast_path_of" not in case]
 ENV = dict(os.environ, LC_ALL="C", TZ="UTC")
 
 
